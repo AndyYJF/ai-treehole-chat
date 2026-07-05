@@ -1,10 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { appendChatMessages, ensureActiveChatThread, listChatMessages, listChatThreads } from "@/lib/chat-history";
+import {
+  appendChatMessages,
+  ensureActiveChatThread,
+  listChatMessages,
+  listChatThreads,
+  updateChatThreadTitle,
+} from "@/lib/chat-history";
 import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine";
 import { streamDeepSeek } from "@/lib/deepseek";
 import { modelTierSchema } from "@/lib/model-routing";
 import { getServerUserId } from "@/lib/server-user";
+import { summarizeThreadTitle } from "@/lib/thread-title";
 
 export const runtime = "nodejs";
 
@@ -31,10 +38,12 @@ export async function POST(request: Request) {
     const userId = getServerUserId();
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
+    const isFirstTurn = serverMessages.length === 0;
     const input = {
       ...body,
       threadId: activeThread.id,
       userId,
+      isFirstTurn,
       recentMessages: serverMessages.slice(-12).map((message) => ({
         role: message.role,
         content: message.content,
@@ -50,10 +59,21 @@ export async function POST(request: Request) {
       { role: "user", content: body.message },
       { role: "assistant", content: result.reply },
     ]);
+    const thread = isFirstTurn
+      ? await updateChatThreadTitle(
+          userId,
+          activeThread.id,
+          await summarizeThreadTitle({
+            userId,
+            userMessage: body.message,
+            assistantReply: result.reply,
+          }),
+        )
+      : await ensureActiveChatThread(userId, activeThread.id);
 
     return NextResponse.json({
       ...result,
-      activeThread: await ensureActiveChatThread(userId, activeThread.id),
+      activeThread: thread,
       threads: await listChatThreads(userId),
       messages,
     });
@@ -73,6 +93,7 @@ function createChatStream(
   input: z.infer<typeof chatRequestSchema> & {
     threadId: string;
     userId: string;
+    isFirstTurn: boolean;
     recentMessages: Array<{ role: "user" | "assistant"; content: string }>;
   },
   signal: AbortSignal,
@@ -120,12 +141,23 @@ function createChatStream(
           { role: "user", content: input.message },
           { role: "assistant", content: reply.trim() || "我在。你可以慢慢说。" },
         ]);
+        const activeThread = input.isFirstTurn
+          ? await updateChatThreadTitle(
+              input.userId,
+              input.threadId,
+              await summarizeThreadTitle({
+                userId: input.userId,
+                userMessage: input.message,
+                assistantReply: reply,
+              }),
+            )
+          : await ensureActiveChatThread(input.userId, input.threadId);
 
         send({
           type: "done",
           routed: prepared.routed,
           memories,
-          activeThread: await ensureActiveChatThread(input.userId, input.threadId),
+          activeThread,
           threads: await listChatThreads(input.userId),
           messages,
         });

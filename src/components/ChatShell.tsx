@@ -505,7 +505,11 @@ export function ChatShell() {
       content: "",
     };
 
-    setMessages((current) => [...current, userMessage, assistantMessage]);
+    setMessages((current) => [
+      ...current.filter((message) => message.id !== "hello"),
+      userMessage,
+      assistantMessage,
+    ]);
     setInput("");
     setIsThinking(true);
     requestAnimationFrame(resizeTextarea);

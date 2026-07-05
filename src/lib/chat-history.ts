@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { getPostgresPool } from "./postgres";
+import { normalizeThreadTitle, titleFromText } from "./thread-title";
 
 export type ChatThread = {
   id: string;
@@ -205,6 +206,35 @@ export async function appendChatMessages(
   return listChatMessages(userId, thread.id);
 }
 
+export async function updateChatThreadTitle(userId: string, threadId: string, title: string): Promise<ChatThread> {
+  const normalizedTitle = normalizeThreadTitle(title);
+  const pool = getPostgresPool();
+
+  if (!pool) {
+    const state = ensureInMemoryState(userId);
+    state.threads = state.threads.map((thread) =>
+      thread.id === threadId
+        ? {
+            ...thread,
+            title: normalizedTitle,
+            updatedAt: new Date().toISOString(),
+          }
+        : thread,
+    );
+    return ensureActiveChatThread(userId, threadId);
+  }
+
+  await ensureChatSchema(userId);
+  await pool.query(
+    `update chat_threads
+    set title = $3, updated_at = now()
+    where user_id = $1 and id = $2`,
+    [userId, threadId, normalizedTitle],
+  );
+
+  return ensureActiveChatThread(userId, threadId);
+}
+
 export async function clearChatMessages(userId: string, threadId?: string | null) {
   const thread = await ensureActiveChatThread(userId, threadId);
   const pool = getPostgresPool();
@@ -367,7 +397,7 @@ function touchInMemoryThread(state: InMemoryThreadState, threadId: string, first
 
     return {
       ...thread,
-      title: thread.messageCount === 0 && firstMessage ? titleFromMessage(firstMessage) : thread.title,
+      title: thread.messageCount === 0 && firstMessage ? titleFromText(firstMessage) : thread.title,
       messageCount: messages.length,
       updatedAt: now,
       lastMessageAt: messages[messages.length - 1]?.createdAt ?? null,
@@ -383,13 +413,8 @@ function sortThreads(threads: ChatThread[]) {
   });
 }
 
-function normalizeThreadTitle(title: string) {
-  const normalized = title.replace(/\s+/g, " ").trim();
-  return normalized ? normalized.slice(0, 32) : "新对话";
-}
-
 function titleFromMessage(message: string) {
-  return normalizeThreadTitle(message).slice(0, 18);
+  return titleFromText(message);
 }
 
 function threadFromRow(row: Record<string, unknown>): ChatThread {

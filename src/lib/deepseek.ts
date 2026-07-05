@@ -5,7 +5,7 @@ export type ChatMessage = {
   content: string;
 };
 
-type DeepSeekOperation = "chat" | "memory_extract";
+type DeepSeekOperation = "chat" | "memory_extract" | "title_summarize";
 
 export async function callDeepSeek(input: {
   userId?: string;
