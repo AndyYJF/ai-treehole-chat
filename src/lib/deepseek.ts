@@ -1,3 +1,4 @@
+import { getRuntimeConfig } from "./app-config";
 import { normalizeUsage, recordModelUsage, type ModelUsage } from "./model-usage";
 
 export type ChatMessage = {
@@ -15,8 +16,9 @@ export async function callDeepSeek(input: {
   temperature?: number;
   signal?: AbortSignal;
 }): Promise<string> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  const baseUrl = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+  const config = await getRuntimeConfig();
+  const apiKey = config.deepseekApiKey;
+  const baseUrl = config.deepseekBaseUrl;
   const start = Date.now();
 
   if (!apiKey) {
@@ -93,8 +95,9 @@ export async function* streamDeepSeek(input: {
   temperature?: number;
   signal?: AbortSignal;
 }): AsyncGenerator<string> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  const baseUrl = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+  const config = await getRuntimeConfig();
+  const apiKey = config.deepseekApiKey;
+  const baseUrl = config.deepseekBaseUrl;
   const start = Date.now();
 
   if (!apiKey) {
@@ -213,8 +216,9 @@ export async function callDeepSeekJson(input: {
   messages: ChatMessage[];
   temperature?: number;
 }): Promise<unknown | null> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  const baseUrl = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+  const config = await getRuntimeConfig();
+  const apiKey = config.deepseekApiKey;
+  const baseUrl = config.deepseekBaseUrl;
   const start = Date.now();
 
   if (!apiKey) return null;

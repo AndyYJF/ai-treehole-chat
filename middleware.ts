@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAccessGateEnabled, isValidSession, SESSION_COOKIE_NAME } from "@/lib/auth";
 
-const PUBLIC_PREFIXES = ["/_next", "/api/session"];
-const PUBLIC_PATHS = new Set(["/login", "/favicon.ico"]);
+const PUBLIC_PREFIXES = ["/_next", "/api/session", "/api/setup"];
+const PUBLIC_PATHS = new Set(["/login", "/setup", "/favicon.ico"]);
 
 export async function middleware(request: NextRequest) {
   if (!isAccessGateEnabled()) return NextResponse.next();

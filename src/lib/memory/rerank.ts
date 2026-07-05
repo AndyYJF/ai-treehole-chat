@@ -1,3 +1,4 @@
+import { getRuntimeConfig } from "../app-config";
 import { sortMemoryForPrompt } from "./store";
 import type { MemoryRecord } from "./types";
 
@@ -41,11 +42,12 @@ export async function selectRelevantMemories({
 }
 
 async function rerankWithSiliconFlow(query: string, memories: MemoryRecord[], limit: number): Promise<MemoryRecord[]> {
-  const apiKey = process.env.SILICONFLOW_API_KEY;
+  const config = await getRuntimeConfig();
+  const apiKey = config.siliconFlowApiKey;
   if (!apiKey || memories.length === 0) return [];
 
-  const baseUrl = process.env.SILICONFLOW_BASE_URL ?? "https://api.siliconflow.cn/v1";
-  const model = process.env.SILICONFLOW_RERANK_MODEL ?? "Qwen/Qwen3-Reranker-0.6B";
+  const baseUrl = config.siliconFlowBaseUrl;
+  const model = config.siliconFlowRerankModel;
   const documents = memories.map(formatMemoryForRerank);
 
   try {

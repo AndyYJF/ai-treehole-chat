@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { requireApiSession } from "@/lib/auth-runtime";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { getServerUserId } from "@/lib/server-user";
 
@@ -20,7 +21,10 @@ const memoryPatchSchema = z.discriminatedUnion("action", [
   }),
 ]);
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const repository = getMemoryRepository();
 
@@ -31,6 +35,9 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   try {
     const body = memoryPatchSchema.parse(await request.json());
     const userId = getServerUserId();
@@ -60,7 +67,10 @@ export async function PATCH(request: Request) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const repository = getMemoryRepository();
 

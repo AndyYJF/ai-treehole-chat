@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireApiSession } from "@/lib/auth-runtime";
 import { listChatMessages, listChatThreads } from "@/lib/chat-history";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { getModelUsageSummary, listModelUsage } from "@/lib/model-usage";
@@ -6,7 +7,10 @@ import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const repository = getMemoryRepository();
 

@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
 
 @theme {
   /* 暖纸与松林 —— 树洞的基础色板 */
@@ -15,6 +16,8 @@
   --color-pine-deep: #22392a;
   --color-clay: #a04e33;
   --color-clay-soft: #f2e3d9;
+  --color-on-pine: #f4f7ee;
+  --color-veil: rgb(34 57 42 / 0.25);
 
   --font-display: Georgia, "Songti SC", "STSong", "SimSun", serif;
 
@@ -29,6 +32,29 @@
   --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
     "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --color-paper: #171c18;
+  --color-card: #20271f;
+  --color-mist: #2b332b;
+  --color-moss: #293829;
+  --color-line: #364033;
+  --color-line-strong: #4a5746;
+  --color-ink: #edf2e8;
+  --color-ink-soft: #c5d0bd;
+  --color-ink-faint: #8f9c8a;
+  --color-pine: #87a978;
+  --color-pine-deep: #dce9d2;
+  --color-clay: #df8b6f;
+  --color-clay-soft: #3d2923;
+  --color-on-pine: #152016;
+  --color-veil: rgb(7 12 8 / 0.58);
 }
 
 @keyframes rise {
@@ -98,6 +124,49 @@ body {
     radial-gradient(46rem 36rem at -12% 108%, rgba(178, 148, 96, 0.11), transparent 58%),
     var(--color-paper);
   background-attachment: fixed;
+}
+
+html[data-theme="dark"] body {
+  background:
+    radial-gradient(58rem 40rem at 90% -14%, rgba(135, 169, 120, 0.13), transparent 62%),
+    radial-gradient(42rem 34rem at -16% 106%, rgba(223, 139, 111, 0.08), transparent 58%),
+    var(--color-paper);
+}
+
+.react-flow {
+  background: transparent;
+}
+
+.react-flow__node {
+  border: 0;
+  box-shadow: none;
+  font-family: var(--font-sans);
+}
+
+.react-flow__handle {
+  background: var(--color-line-strong);
+  border-color: var(--color-card);
+}
+
+.react-flow__edge-path {
+  stroke: var(--color-line-strong);
+}
+
+.react-flow__controls {
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgb(34 57 42 / 0.12);
+}
+
+.react-flow__controls-button {
+  background: var(--color-card);
+  border-bottom-color: var(--color-line);
+  color: var(--color-ink-soft);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-mist);
 }
 
 button,

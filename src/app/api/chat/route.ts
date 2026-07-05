@@ -9,6 +9,7 @@ import {
 } from "@/lib/chat-history";
 import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine";
 import { streamDeepSeek } from "@/lib/deepseek";
+import { requireApiSession } from "@/lib/auth-runtime";
 import { modelTierSchema } from "@/lib/model-routing";
 import { getServerUserId } from "@/lib/server-user";
 import { summarizeThreadTitle } from "@/lib/thread-title";
@@ -33,6 +34,9 @@ const chatRequestSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   try {
     const body = chatRequestSchema.parse(await request.json());
     const userId = getServerUserId();

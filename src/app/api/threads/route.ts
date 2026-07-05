@@ -7,6 +7,7 @@ import {
   listChatMessages,
   listChatThreads,
 } from "@/lib/chat-history";
+import { requireApiSession } from "@/lib/auth-runtime";
 import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
@@ -16,6 +17,9 @@ const createThreadSchema = z.object({
 });
 
 export async function GET(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const threadId = new URL(request.url).searchParams.get("threadId");
   const activeThread = await ensureActiveChatThread(userId, threadId);
@@ -28,6 +32,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const body = createThreadSchema.parse(await request.json().catch(() => ({})));
   const thread = await createChatThread(userId, body.title);
@@ -40,6 +47,9 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const threadId = new URL(request.url).searchParams.get("threadId");
 

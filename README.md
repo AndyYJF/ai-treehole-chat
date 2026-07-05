@@ -40,6 +40,12 @@ docker compose up -d --build
 - `ai-treehole-chat-db`：Postgres，仅 Docker 内网可访问
 - `treehole-postgres`：Postgres 数据卷
 
+## 首次部署
+
+首次部署如果没有同时配置 `TREEHOLE_ACCESS_TOKEN` 和 `DEEPSEEK_API_KEY`，访问首页会进入 `/setup` 引导页。按步骤填写进入口令、DeepSeek Key 和可选的 SiliconFlow rerank 配置后，引导页会把配置保存到 Postgres，并跳转到登录页。
+
+完成初始化后，`/setup` 不再出现。环境变量仍然拥有最高优先级：如果 `.env.production` 已经填好关键字段，应用会直接跳过引导页。
+
 ## 环境变量
 
 复制 `.env.example` 为 `.env.production` 或 `.env.local` 后填入：

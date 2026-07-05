@@ -14,9 +14,12 @@ import {
   Check,
   ChevronDown,
   Download,
+  Eye,
   Leaf,
   LogOut,
   MessageSquare,
+  Moon,
+  Network,
   PenLine,
   Plus,
   Send,
@@ -24,11 +27,21 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   Trash2,
   X,
 } from "lucide-react";
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeMouseHandler,
+} from "@xyflow/react";
 import { tierOptions, type ModelTier } from "@/lib/model-routing";
 import type { MemoryRecord, MemoryType } from "@/lib/memory/types";
+import { type ThemePreference, useThemePreference } from "@/lib/theme";
 
 type Message = {
   id: string;
@@ -120,6 +133,18 @@ const memoryTypeLabels: Record<MemoryType, string> = {
   boundary: "边界",
 };
 
+const memoryTypeOrder = Object.keys(memoryTypeLabels) as MemoryType[];
+
+const themeOptions: Array<{
+  value: ThemePreference;
+  label: string;
+  icon: React.ReactNode;
+}> = [
+  { value: "system", label: "跟随", icon: <Sparkles size={14} /> },
+  { value: "light", label: "浅色", icon: <Sun size={14} /> },
+  { value: "dark", label: "深色", icon: <Moon size={14} /> },
+];
+
 export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
@@ -128,6 +153,8 @@ export function ChatShell() {
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memoryView, setMemoryView] = useState<"list" | "graph">("list");
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [memoryEnabled, setMemoryEnabledState] = useState(true);
@@ -142,6 +169,7 @@ export function ChatShell() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
+  const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -277,6 +305,9 @@ export function ChatShell() {
     if (!response.ok) return;
     const data = (await response.json()) as { memories: MemoryRecord[] };
     setMemories(data.memories);
+    if (action === "delete") {
+      setSelectedMemoryId((current) => (current === memoryId ? null : current));
+    }
   }
 
   async function clearAllMemories() {
@@ -847,6 +878,28 @@ export function ChatShell() {
             </div>
           </section>
 
+          <section className="rounded-2xl border border-line bg-card p-4">
+            <PanelLabel>外观</PanelLabel>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {themeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setPreference(option.value)}
+                  aria-pressed={preference === option.value}
+                  className={`inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl border px-2.5 text-xs transition ${
+                    preference === option.value
+                      ? "border-pine bg-moss text-pine-deep"
+                      : "border-line bg-card text-ink-soft hover:border-line-strong hover:bg-mist/50"
+                  }`}
+                >
+                  {option.icon}
+                  <span>{option.label}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
           <section className="overflow-hidden rounded-2xl border border-line bg-card">
             <button
               type="button"
@@ -962,68 +1015,272 @@ export function ChatShell() {
             </div>
           ) : (
             <>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-ink-faint">共 {memories.length} 条</p>
-                <button
-                  type="button"
-                  onClick={() => void clearAllMemories()}
-                  className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs text-clay transition hover:bg-clay-soft"
-                  aria-label="清空记忆"
-                  title="清空记忆"
-                >
-                  <Trash2 size={13} />
-                  清空
-                </button>
-              </div>
-              {memories.map((memory) => (
-                <div
-                  key={memory.id}
-                  className="animate-rise rounded-2xl border border-line bg-card p-4 shadow-[0_2px_10px_rgba(63,58,38,0.05)]"
-                >
-                  <p className="text-sm leading-6 text-ink">{memory.content}</p>
-                  <div className="mt-3 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
-                      <span className="rounded-full bg-moss px-2 py-0.5 text-[11px] text-pine-deep">
-                        {memoryTypeLabels[memory.type]}
-                      </span>
-                      {memory.userConfirmed ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
-                          <Check size={11} />
-                          已确认
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {!memory.userConfirmed ? (
-                        <button
-                          type="button"
-                          onClick={() => void updateMemory("confirm", memory.id)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full text-pine transition hover:bg-moss"
-                          aria-label="确认记忆"
-                          title="确认记忆"
-                        >
-                          <Check size={15} />
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => void updateMemory("delete", memory.id)}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-clay transition hover:bg-clay-soft"
-                        aria-label="删除记忆"
-                        title="删除记忆"
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </div>
+                <div className="flex items-center gap-1.5">
+                  <ViewToggle
+                    value={memoryView}
+                    onChange={(next) => {
+                      setMemoryView(next);
+                      if (next === "list") setSelectedMemoryId(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void clearAllMemories()}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full text-clay transition hover:bg-clay-soft"
+                    aria-label="清空记忆"
+                    title="清空记忆"
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 </div>
-              ))}
+              </div>
+              {memoryView === "graph" ? (
+                <MemoryGraph
+                  memories={memories}
+                  selectedMemoryId={selectedMemoryId}
+                  onSelectMemory={setSelectedMemoryId}
+                  onUpdateMemory={(action, memoryId) => void updateMemory(action, memoryId)}
+                />
+              ) : (
+                memories.map((memory) => (
+                  <MemoryCard
+                    key={memory.id}
+                    memory={memory}
+                    onUpdate={(action) => void updateMemory(action, memory.id)}
+                  />
+                ))
+              )}
             </>
           )}
         </div>
       </SidePanel>
     </main>
   );
+}
+
+function ViewToggle({
+  value,
+  onChange,
+}: {
+  value: "list" | "graph";
+  onChange: (value: "list" | "graph") => void;
+}) {
+  return (
+    <div className="inline-grid h-8 grid-cols-2 rounded-full border border-line bg-card p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange("list")}
+        aria-pressed={value === "list"}
+        className={`inline-flex h-7 w-8 items-center justify-center rounded-full transition ${
+          value === "list" ? "bg-moss text-pine-deep" : "text-ink-faint hover:text-pine"
+        }`}
+        title="列表"
+        aria-label="列表"
+      >
+        <Eye size={13} />
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("graph")}
+        aria-pressed={value === "graph"}
+        className={`inline-flex h-7 w-8 items-center justify-center rounded-full transition ${
+          value === "graph" ? "bg-moss text-pine-deep" : "text-ink-faint hover:text-pine"
+        }`}
+        title="图谱"
+        aria-label="图谱"
+      >
+        <Network size={13} />
+      </button>
+    </div>
+  );
+}
+
+function MemoryCard({
+  memory,
+  onUpdate,
+}: {
+  memory: MemoryRecord;
+  onUpdate: (action: "confirm" | "delete") => void;
+}) {
+  return (
+    <div className="animate-rise rounded-2xl border border-line bg-card p-4 shadow-[0_2px_10px_rgba(63,58,38,0.05)]">
+      <p className="text-sm leading-6 text-ink">{memory.content}</p>
+      <MemoryMeta memory={memory} />
+      <MemoryActions memory={memory} onUpdate={onUpdate} />
+    </div>
+  );
+}
+
+function MemoryMeta({ memory }: { memory: MemoryRecord }) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      <span className="rounded-full bg-moss px-2 py-0.5 text-[11px] text-pine-deep">
+        {memoryTypeLabels[memory.type]}
+      </span>
+      <span className="rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
+        {memory.importance}
+      </span>
+      {memory.userConfirmed ? (
+        <span className="inline-flex items-center gap-1 rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
+          <Check size={11} />
+          已确认
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function MemoryActions({
+  memory,
+  onUpdate,
+}: {
+  memory: MemoryRecord;
+  onUpdate: (action: "confirm" | "delete") => void;
+}) {
+  return (
+    <div className="mt-3 flex items-center justify-end gap-1">
+      {!memory.userConfirmed ? (
+        <button
+          type="button"
+          onClick={() => onUpdate("confirm")}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-full text-pine transition hover:bg-moss"
+          aria-label="确认记忆"
+          title="确认记忆"
+        >
+          <Check size={15} />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => onUpdate("delete")}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-clay transition hover:bg-clay-soft"
+        aria-label="删除记忆"
+        title="删除记忆"
+      >
+        <Trash2 size={15} />
+      </button>
+    </div>
+  );
+}
+
+function MemoryGraph({
+  memories,
+  selectedMemoryId,
+  onSelectMemory,
+  onUpdateMemory,
+}: {
+  memories: MemoryRecord[];
+  selectedMemoryId: string | null;
+  onSelectMemory: (memoryId: string | null) => void;
+  onUpdateMemory: (action: "confirm" | "delete", memoryId: string) => void;
+}) {
+  const selectedMemory =
+    memories.find((memory) => memory.id === selectedMemoryId) ?? null;
+
+  const { nodes, edges } = useMemo(() => {
+    const usedTypes = memoryTypeOrder.filter((type) =>
+      memories.some((memory) => memory.type === type),
+    );
+
+    const typeNodes: Node[] = usedTypes.map((type, index) => ({
+      id: `type-${type}`,
+      type: "default",
+      position: { x: index * 150, y: 20 },
+      data: { label: memoryTypeLabels[type], kind: "type" },
+      style: {
+        width: 104,
+        border: "1px solid var(--color-line)",
+        borderRadius: 16,
+        background: "var(--color-moss)",
+        color: "var(--color-pine-deep)",
+        fontSize: 12,
+      },
+    }));
+
+    const memoryNodes: Node[] = memories.map((memory, index) => {
+      const typeIndex = Math.max(0, usedTypes.indexOf(memory.type));
+      const selected = memory.id === selectedMemoryId;
+
+      return {
+        id: memory.id,
+        type: "default",
+        position: {
+          x: typeIndex * 150 + (index % 2) * 28,
+          y: 135 + Math.floor(index / Math.max(1, usedTypes.length)) * 112,
+        },
+        data: {
+          label: truncateMemory(memory.content),
+          kind: "memory",
+          memoryId: memory.id,
+        },
+        style: {
+          width: 132,
+          border: `1px solid ${selected ? "var(--color-pine)" : "var(--color-line)"}`,
+          borderRadius: 18,
+          background: selected ? "var(--color-pine)" : "var(--color-card)",
+          color: selected ? "var(--color-on-pine)" : "var(--color-ink)",
+          fontSize: 11,
+          lineHeight: 1.45,
+          boxShadow: selected
+            ? "0 10px 24px rgb(34 57 42 / 0.2)"
+            : "0 2px 10px rgb(63 58 38 / 0.06)",
+        },
+      };
+    });
+
+    const graphEdges: Edge[] = memories.map((memory) => ({
+      id: `edge-${memory.id}`,
+      source: `type-${memory.type}`,
+      target: memory.id,
+      animated: memory.id === selectedMemoryId,
+      style: { stroke: "var(--color-line-strong)" },
+    }));
+
+    return { nodes: [...typeNodes, ...memoryNodes], edges: graphEdges };
+  }, [memories, selectedMemoryId]);
+
+  const handleNodeClick: NodeMouseHandler = (_, node) => {
+    const memoryId = node.data?.memoryId;
+    onSelectMemory(typeof memoryId === "string" ? memoryId : null);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="h-[360px] overflow-hidden rounded-2xl border border-line bg-card">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodeClick={handleNodeClick}
+          fitView
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable
+          panOnScroll
+        >
+          <Background color="var(--color-line)" gap={18} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
+      {selectedMemory ? (
+        <div className="rounded-2xl border border-line bg-card p-4">
+          <p className="text-sm leading-6 text-ink">{selectedMemory.content}</p>
+          <MemoryMeta memory={selectedMemory} />
+          <MemoryActions
+            memory={selectedMemory}
+            onUpdate={(action) => onUpdateMemory(action, selectedMemory.id)}
+          />
+        </div>
+      ) : (
+        <p className="px-1 text-xs text-ink-faint">点一个节点查看或删除。</p>
+      )}
+    </div>
+  );
+}
+
+function truncateMemory(content: string) {
+  return content.length > 34 ? `${content.slice(0, 34)}...` : content;
 }
 
 function toDisplayMessages(messages: StoredChatMessage[]): Message[] {

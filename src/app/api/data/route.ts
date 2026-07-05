@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireApiSession } from "@/lib/auth-runtime";
 import { clearAllChatMessages, ensureActiveChatThread, listChatThreads } from "@/lib/chat-history";
 import { clearModelUsage, getModelUsageSummary } from "@/lib/model-usage";
 import { getMemoryRepository } from "@/lib/memory/repository";
@@ -6,7 +7,10 @@ import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  const unauthorized = await requireApiSession(request);
+  if (unauthorized) return unauthorized;
+
   const userId = getServerUserId();
   const repository = getMemoryRepository();
 
