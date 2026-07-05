@@ -1729,56 +1729,122 @@ function MemoryGraph({
   const selectedMemory =
     memories.find((memory) => memory.id === selectedMemoryId) ?? null;
 
-  const { nodes, edges } = useMemo(() => {
+  const { nodes, edges, graphSize } = useMemo(() => {
     const usedTypes = memoryTypeOrder.filter((type) =>
       memories.some((memory) => memory.type === type),
     );
+    const center = { x: 420, y: 300 };
+    const typeRadius = Math.max(150, Math.min(250, 130 + usedTypes.length * 18));
+    const memoryRadius = 122;
+    const typeNodeWidth = 124;
+    const memoryNodeWidth = 152;
+    const grouped = new Map<MemoryType, MemoryRecord[]>();
 
-    const typeNodes: Node[] = usedTypes.map((type, index) => ({
-      id: `type-${type}`,
-      type: "default",
-      position: { x: index * 150, y: 20 },
-      data: { label: memoryTypeLabels[type], kind: "type" },
-      style: {
-        width: 104,
-        border: "1px solid var(--color-line)",
-        borderRadius: 16,
-        background: "var(--color-moss)",
-        color: "var(--color-pine-deep)",
-        fontSize: 12,
-      },
-    }));
+    for (const type of usedTypes) {
+      grouped.set(
+        type,
+        memories
+          .filter((memory) => memory.type === type)
+          .sort((a, b) => b.importance - a.importance || b.lastSeenAt.localeCompare(a.lastSeenAt)),
+      );
+    }
 
-    const memoryNodes: Node[] = memories.map((memory, index) => {
-      const typeIndex = Math.max(0, usedTypes.indexOf(memory.type));
-      const selected = memory.id === selectedMemoryId;
+    const typePositions = new Map<MemoryType, { x: number; y: number; angle: number }>();
+    const typeNodes: Node[] = usedTypes.map((type, index) => {
+      const angle = -Math.PI / 2 + (index / Math.max(usedTypes.length, 1)) * Math.PI * 2;
+      const x = center.x + Math.cos(angle) * typeRadius;
+      const y = center.y + Math.sin(angle) * typeRadius;
+      typePositions.set(type, { x, y, angle });
 
       return {
-        id: memory.id,
+        id: `type-${type}`,
         type: "default",
-        position: {
-          x: typeIndex * 150 + (index % 2) * 28,
-          y: 135 + Math.floor(index / Math.max(1, usedTypes.length)) * 112,
-        },
-        data: {
-          label: truncateMemory(memory.content),
-          kind: "memory",
-          memoryId: memory.id,
-        },
+        position: { x, y },
+        data: { label: memoryTypeLabels[type], kind: "type" },
         style: {
-          width: 132,
-          border: `1px solid ${selected ? "var(--color-pine)" : "var(--color-line)"}`,
-          borderRadius: 18,
-          background: selected ? "var(--color-pine)" : "var(--color-card)",
-          color: selected ? "var(--color-on-pine)" : "var(--color-ink)",
-          fontSize: 11,
-          lineHeight: 1.45,
-          boxShadow: selected
-            ? "0 10px 24px rgb(34 57 42 / 0.2)"
-            : "0 2px 10px rgb(63 58 38 / 0.06)",
+          width: typeNodeWidth,
+          border: "1px solid var(--color-line)",
+          borderRadius: 999,
+          background: "var(--color-moss)",
+          color: "var(--color-pine-deep)",
+          fontSize: 12,
+          fontWeight: 600,
+          padding: "9px 12px",
+          textAlign: "center",
+          boxShadow: "0 8px 20px rgb(63 58 38 / 0.08)",
         },
       };
     });
+
+    const rawMemoryNodes: Node[] = usedTypes.flatMap((type) =>
+      (grouped.get(type) ?? []).map((memory, memoryIndex) => {
+        const selected = memory.id === selectedMemoryId;
+        const typePosition = typePositions.get(type) ?? { ...center, angle: 0 };
+        const memoriesInType = grouped.get(type)?.length ?? 1;
+        const perRing = 4;
+        const ringIndex = Math.floor(memoryIndex / perRing);
+        const indexInRing = memoryIndex % perRing;
+        const itemsInRing = Math.min(perRing, memoriesInType - ringIndex * perRing);
+        const spread = Math.min(Math.PI * 1.2, Math.max(Math.PI * 0.5, itemsInRing * 0.34));
+        const offset =
+          itemsInRing === 1
+            ? 0
+            : -spread / 2 + (indexInRing / Math.max(itemsInRing - 1, 1)) * spread;
+        const angle = typePosition.angle + offset;
+        const ring = memoryRadius + ringIndex * 150;
+        const xJitter = ringIndex % 2 === 0 ? 0 : 34;
+        const yJitter = indexInRing % 2 === 0 ? 0 : 18;
+
+        return {
+          id: memory.id,
+          type: "default",
+          position: {
+            x: typePosition.x + Math.cos(angle) * ring + xJitter,
+            y: typePosition.y + Math.sin(angle) * ring + yJitter,
+          },
+          data: {
+            label: truncateMemory(memory.content),
+            kind: "memory",
+            memoryId: memory.id,
+          },
+          style: {
+            width: memoryNodeWidth,
+            minHeight: 72,
+            border: `1px solid ${selected ? "var(--color-pine)" : "var(--color-line)"}`,
+            borderRadius: 12,
+            background: selected ? "var(--color-pine)" : "var(--color-card)",
+            color: selected ? "var(--color-on-pine)" : "var(--color-ink)",
+            fontSize: 11,
+            lineHeight: 1.5,
+            padding: "9px 10px",
+            boxShadow: selected
+              ? "0 10px 24px rgb(34 57 42 / 0.2)"
+              : "0 2px 10px rgb(63 58 38 / 0.06)",
+          },
+        };
+      }),
+    );
+
+    const centerNode: Node = {
+      id: "memory-center",
+      type: "default",
+      position: center,
+      data: { label: "长期记忆", kind: "center" },
+      selectable: false,
+      draggable: false,
+      style: {
+        width: 116,
+        border: "1px solid var(--color-pine)",
+        borderRadius: 999,
+        background: "var(--color-pine)",
+        color: "var(--color-on-pine)",
+        fontSize: 12,
+        fontWeight: 600,
+        padding: "10px 12px",
+        textAlign: "center",
+        boxShadow: "0 12px 28px rgb(34 57 42 / 0.22)",
+      },
+    };
 
     const graphEdges: Edge[] = memories.map((memory) => ({
       id: `edge-${memory.id}`,
@@ -1787,8 +1853,21 @@ function MemoryGraph({
       animated: memory.id === selectedMemoryId,
       style: { stroke: "var(--color-line-strong)" },
     }));
+    const typeEdges: Edge[] = usedTypes.map((type) => ({
+      id: `edge-center-${type}`,
+      source: "memory-center",
+      target: `type-${type}`,
+      style: { stroke: "var(--color-line)" },
+    }));
 
-    return { nodes: [...typeNodes, ...memoryNodes], edges: graphEdges };
+    const layoutNodes = resolveMemoryGraphCollisions([centerNode, ...typeNodes, ...rawMemoryNodes]);
+    const bounds = getMemoryGraphBounds(layoutNodes);
+    const graphSize = {
+      width: Math.max(1120, bounds.maxX + 120),
+      height: Math.max(860, bounds.maxY + 120),
+    };
+
+    return { nodes: layoutNodes, edges: [...typeEdges, ...graphEdges], graphSize };
   }, [memories, selectedMemoryId]);
 
   const handleNodeClick: NodeMouseHandler = (_, node) => {
@@ -1798,16 +1877,30 @@ function MemoryGraph({
 
   return (
     <div className="space-y-3">
-      <div className="h-[360px] overflow-hidden rounded-2xl border border-line bg-card">
+      <div className="h-[420px] overflow-auto rounded-2xl border border-line bg-card">
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodeClick={handleNodeClick}
-          fitView
+          defaultViewport={{ x: -220, y: -120, zoom: 0.82 }}
+          minZoom={0.45}
+          maxZoom={1.3}
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable
           panOnScroll
+          translateExtent={[
+            [-80, -80],
+            [graphSize.width, graphSize.height],
+          ]}
+          nodeExtent={[
+            [-20, -20],
+            [graphSize.width - 40, graphSize.height - 40],
+          ]}
+          style={{
+            width: graphSize.width,
+            height: graphSize.height,
+          }}
         >
           <Background color="var(--color-line)" gap={18} />
           <Controls showInteractive={false} />
@@ -1828,6 +1921,129 @@ function MemoryGraph({
 
 function truncateMemory(content: string) {
   return content.length > 34 ? `${content.slice(0, 34)}...` : content;
+}
+
+function resolveMemoryGraphCollisions(nodes: Node[]) {
+  const padding = 18;
+  const movableIds = new Set(
+    nodes
+      .filter((node) => node.data?.kind === "memory")
+      .map((node) => node.id),
+  );
+  const originalPositions = new Map(
+    nodes.map((node) => [node.id, { ...node.position }]),
+  );
+  const layoutNodes = nodes.map((node) => ({
+    ...node,
+    position: { ...node.position },
+  }));
+
+  for (let iteration = 0; iteration < 90; iteration += 1) {
+    let moved = false;
+
+    for (let leftIndex = 0; leftIndex < layoutNodes.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < layoutNodes.length; rightIndex += 1) {
+        const left = layoutNodes[leftIndex];
+        const right = layoutNodes[rightIndex];
+        const leftMovable = movableIds.has(left.id);
+        const rightMovable = movableIds.has(right.id);
+
+        if (!leftMovable && !rightMovable) continue;
+
+        const leftBox = getMemoryGraphNodeBox(left);
+        const rightBox = getMemoryGraphNodeBox(right);
+        const dx = rightBox.centerX - leftBox.centerX;
+        const dy = rightBox.centerY - leftBox.centerY;
+        const overlapX = leftBox.width / 2 + rightBox.width / 2 + padding - Math.abs(dx);
+        const overlapY = leftBox.height / 2 + rightBox.height / 2 + padding - Math.abs(dy);
+
+        if (overlapX <= 0 || overlapY <= 0) continue;
+
+        moved = true;
+        const pushX = dx === 0 ? (leftIndex % 2 === 0 ? 1 : -1) : Math.sign(dx);
+        const pushY = dy === 0 ? (rightIndex % 2 === 0 ? 1 : -1) : Math.sign(dy);
+
+        if (overlapX < overlapY) {
+          const shift = overlapX + 4;
+          if (leftMovable && rightMovable) {
+            left.position.x -= (shift * pushX) / 2;
+            right.position.x += (shift * pushX) / 2;
+          } else if (leftMovable) {
+            left.position.x -= shift * pushX;
+          } else {
+            right.position.x += shift * pushX;
+          }
+        } else {
+          const shift = overlapY + 4;
+          if (leftMovable && rightMovable) {
+            left.position.y -= (shift * pushY) / 2;
+            right.position.y += (shift * pushY) / 2;
+          } else if (leftMovable) {
+            left.position.y -= shift * pushY;
+          } else {
+            right.position.y += shift * pushY;
+          }
+        }
+      }
+    }
+
+    for (const node of layoutNodes) {
+      if (!movableIds.has(node.id)) continue;
+      const original = originalPositions.get(node.id);
+      if (!original) continue;
+
+      node.position.x += (original.x - node.position.x) * 0.006;
+      node.position.y += (original.y - node.position.y) * 0.006;
+    }
+
+    if (!moved) break;
+  }
+
+  const bounds = getMemoryGraphBounds(layoutNodes);
+  const offsetX = bounds.minX < 40 ? 40 - bounds.minX : 0;
+  const offsetY = bounds.minY < 40 ? 40 - bounds.minY : 0;
+
+  if (offsetX === 0 && offsetY === 0) return layoutNodes;
+
+  return layoutNodes.map((node) => ({
+    ...node,
+    position: {
+      x: node.position.x + offsetX,
+      y: node.position.y + offsetY,
+    },
+  }));
+}
+
+function getMemoryGraphNodeBox(node: Node) {
+  const kind = node.data?.kind;
+  const width = kind === "memory" ? 172 : kind === "type" ? 144 : 136;
+  const height = kind === "memory" ? 96 : 56;
+
+  return {
+    width,
+    height,
+    centerX: node.position.x + width / 2,
+    centerY: node.position.y + height / 2,
+    minX: node.position.x,
+    minY: node.position.y,
+    maxX: node.position.x + width,
+    maxY: node.position.y + height,
+  };
+}
+
+function getMemoryGraphBounds(nodes: Node[]) {
+  return nodes.reduce(
+    (bounds, node) => {
+      const box = getMemoryGraphNodeBox(node);
+      return {
+        minX: Math.min(bounds.minX, box.minX),
+        minY: Math.min(bounds.minY, box.minY),
+        maxX: Math.max(bounds.maxX, box.maxX),
+        maxY: Math.max(bounds.maxY, box.maxY),
+      };
+    },
+    { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: 0, maxY: 0 },
+  );
 }
 
 function formatMemoryDate(value: string): string {
