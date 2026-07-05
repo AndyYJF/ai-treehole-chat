@@ -12,6 +12,9 @@ export type RuntimeConfig = {
   siliconFlowApiKey: string;
   siliconFlowBaseUrl: string;
   siliconFlowRerankModel: string;
+  tavilyApiKey: string;
+  braveSearchApiKey: string;
+  realityCountryCode: string;
 };
 
 export type SetupConfigInput = {
@@ -23,6 +26,9 @@ export type SetupConfigInput = {
   siliconFlowApiKey?: string;
   siliconFlowBaseUrl: string;
   siliconFlowRerankModel: string;
+  tavilyApiKey?: string;
+  braveSearchApiKey?: string;
+  realityCountryCode?: string;
 };
 
 const configKeys = [
@@ -35,6 +41,9 @@ const configKeys = [
   "siliconFlowApiKey",
   "siliconFlowBaseUrl",
   "siliconFlowRerankModel",
+  "tavilyApiKey",
+  "braveSearchApiKey",
+  "realityCountryCode",
 ] as const;
 
 type ConfigKey = (typeof configKeys)[number];
@@ -64,6 +73,9 @@ export async function getRuntimeConfig(): Promise<RuntimeConfig> {
       process.env.SILICONFLOW_RERANK_MODEL ??
       stored.siliconFlowRerankModel ??
       "Qwen/Qwen3-Reranker-0.6B",
+    tavilyApiKey: process.env.TAVILY_API_KEY ?? stored.tavilyApiKey ?? "",
+    braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY ?? stored.braveSearchApiKey ?? "",
+    realityCountryCode: process.env.REALITY_COUNTRY_CODE ?? stored.realityCountryCode ?? "CN",
   };
 }
 
@@ -82,6 +94,9 @@ export async function saveSetupConfig(input: SetupConfigInput) {
     siliconFlowApiKey: input.siliconFlowApiKey?.trim() ?? "",
     siliconFlowBaseUrl: input.siliconFlowBaseUrl.trim() || "https://api.siliconflow.cn/v1",
     siliconFlowRerankModel: input.siliconFlowRerankModel.trim() || "Qwen/Qwen3-Reranker-0.6B",
+    tavilyApiKey: input.tavilyApiKey?.trim() ?? "",
+    braveSearchApiKey: input.braveSearchApiKey?.trim() ?? "",
+    realityCountryCode: input.realityCountryCode?.trim().toUpperCase() || "CN",
   };
 
   const pool = getPostgresPool();

@@ -53,6 +53,9 @@ TREEHOLE_COOKIE_SECURE=false
 SILICONFLOW_API_KEY=
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
 SILICONFLOW_RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
+TAVILY_API_KEY=
+BRAVE_SEARCH_API_KEY=
+REALITY_COUNTRY_CODE=CN
 ```
 
 `DATABASE_URL` 由 `docker-compose.yml` 注入到 Web 容器，指向内部 Postgres：
@@ -64,6 +67,8 @@ postgresql://treehole:treehole-local-change-me@db:5432/treehole
 数据库没有映射宿主机端口，不直接暴露到公网。
 
 `TREEHOLE_ACCESS_TOKEN` 配置后会启用单用户访问门禁。登录成功后服务端写入 httpOnly cookie；不配置时本地开发保持开放。
+
+`REALITY_COUNTRY_CODE` 默认 `CN`，用于查询公开节假日。`TAVILY_API_KEY` 和 `BRAVE_SEARCH_API_KEY` 是可选联网搜索增强；是否搜索由一次轻量 LLM JSON 判定决定。不配置搜索 Key 时，聊天仍会获得当前时间和节假日上下文，但不会假装已经联网检索。
 
 当前直连 IP 使用 HTTP，因此 `TREEHOLE_COOKIE_SECURE=false`。绑定 HTTPS 域名后应改为 `true`。
 

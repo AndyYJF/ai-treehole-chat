@@ -2,6 +2,7 @@
 
 import {
   FormEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -916,7 +917,7 @@ export function ChatShell() {
         </header>
 
         <section
-          className={`flex flex-1 flex-col gap-4 py-6 ${isFreshThread ? "justify-center" : "justify-end"}`}
+          className={`flex flex-1 flex-col gap-4 pb-32 pt-6 ${isFreshThread ? "justify-center" : "justify-end"}`}
         >
           {isFreshThread ? (
             <div className="animate-rise flex flex-col items-center gap-5 pb-16 text-center">
@@ -942,15 +943,15 @@ export function ChatShell() {
                       message.role === "user" ? "justify-end" : "justify-start"
                     }`}
                   >
-                    <p
+                    <div
                       className={`max-w-[85%] whitespace-pre-wrap px-4.5 py-3 text-[15px] leading-7 sm:max-w-[72%] ${
                         message.role === "user"
                           ? "rounded-3xl rounded-br-lg bg-pine text-[#f4f7ee] shadow-[0_6px_20px_rgba(34,57,42,0.22)]"
                           : "rounded-3xl rounded-bl-lg border border-line bg-card text-ink shadow-[0_2px_12px_rgba(63,58,38,0.06)]"
                       }`}
                     >
-                      {message.content}
-                    </p>
+                      <MarkdownMessage content={message.content} isUser={message.role === "user"} />
+                    </div>
                   </article>
                 ) : null,
               )}
@@ -974,35 +975,37 @@ export function ChatShell() {
           )}
         </section>
 
-        <div className="sticky bottom-0 -mx-4 bg-gradient-to-t from-paper via-paper/95 to-transparent px-4 pb-4 pt-2 sm:-mx-6 sm:px-6">
-          <form
-            onSubmit={sendMessage}
-            className="flex items-end gap-2 rounded-[26px] border border-line bg-card p-2 shadow-[0_14px_44px_rgba(63,58,38,0.14)] transition focus-within:border-line-strong"
-          >
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(event) => {
-                setInput(event.target.value);
-                resizeTextarea();
-              }}
-              rows={1}
-              placeholder="写给我……"
-              aria-label="写给我"
-              className="max-h-40 min-h-11 flex-1 resize-none bg-transparent px-3 py-2.5 text-[15px] leading-6 text-ink outline-none placeholder:text-ink-faint"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || isThinking}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-pine text-card shadow-[0_4px_14px_rgba(34,57,42,0.3)] transition hover:bg-pine-deep active:scale-95 disabled:cursor-not-allowed disabled:bg-line-strong disabled:shadow-none"
-              aria-label="发送"
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 px-4 pb-4 pt-5 sm:px-6">
+          <div className="pointer-events-auto mx-auto w-full max-w-3xl">
+            <form
+              onSubmit={sendMessage}
+              className="flex items-end gap-2 rounded-[26px] border border-line bg-card p-2 transition focus-within:border-line-strong"
             >
-              <Send size={17} strokeWidth={1.8} />
-            </button>
-          </form>
-          <p className="mt-2 text-center text-[11px] text-ink-faint">
-            这里只有你和树洞，数据随时可以导出或清空。
-          </p>
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  resizeTextarea();
+                }}
+                rows={1}
+                placeholder="写给我……"
+                aria-label="写给我"
+                className="max-h-40 min-h-11 flex-1 resize-none bg-transparent px-3 py-2.5 text-[15px] leading-6 text-ink outline-none placeholder:text-ink-faint"
+              />
+              <button
+                type="submit"
+                disabled={!input.trim() || isThinking}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-pine text-card transition hover:bg-pine-deep active:scale-95 disabled:cursor-not-allowed disabled:bg-line-strong"
+                aria-label="发送"
+              >
+                <Send size={17} strokeWidth={1.8} />
+              </button>
+            </form>
+            <p className="mt-2 text-center text-[11px] text-ink-faint">
+              这里只有你和树洞，数据随时可以导出或清空。
+            </p>
+          </div>
         </div>
       </div>
 
@@ -2044,6 +2047,252 @@ function getMemoryGraphBounds(nodes: Node[]) {
     },
     { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: 0, maxY: 0 },
   );
+}
+
+type MarkdownBlock =
+  | { type: "paragraph"; lines: string[] }
+  | { type: "heading"; level: number; text: string }
+  | { type: "unordered-list"; items: string[] }
+  | { type: "ordered-list"; items: string[] }
+  | { type: "blockquote"; lines: string[] }
+  | { type: "code"; language: string; content: string };
+
+function MarkdownMessage({ content, isUser }: { content: string; isUser: boolean }) {
+  const blocks = useMemo(() => parseMarkdownBlocks(content), [content]);
+
+  return (
+    <div className={`space-y-2.5 ${isUser ? "markdown-user" : "markdown-assistant"}`}>
+      {blocks.map((block, index) => renderMarkdownBlock(block, index, isUser))}
+    </div>
+  );
+}
+
+function renderMarkdownBlock(block: MarkdownBlock, index: number, isUser: boolean) {
+  if (block.type === "heading") {
+    const className = "text-[15px] font-semibold leading-7";
+    const children = renderInlineMarkdown(block.text, isUser);
+
+    if (block.level === 1) return <h3 key={index} className={className}>{children}</h3>;
+    if (block.level === 2) return <h4 key={index} className={className}>{children}</h4>;
+    return <h5 key={index} className={className}>{children}</h5>;
+  }
+
+  if (block.type === "unordered-list") {
+    return (
+      <ul key={index} className="space-y-1 pl-4">
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex} className="list-disc whitespace-normal">
+            {renderInlineMarkdown(item, isUser)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (block.type === "ordered-list") {
+    return (
+      <ol key={index} className="space-y-1 pl-4">
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex} className="list-decimal whitespace-normal">
+            {renderInlineMarkdown(item, isUser)}
+          </li>
+        ))}
+      </ol>
+    );
+  }
+
+  if (block.type === "blockquote") {
+    return (
+      <blockquote
+        key={index}
+        className={`border-l-2 pl-3 italic ${
+          isUser ? "border-[#f4f7ee]/50 text-[#f4f7ee]/90" : "border-line-strong text-ink-soft"
+        }`}
+      >
+        {renderInlineMarkdown(block.lines.join("\n"), isUser)}
+      </blockquote>
+    );
+  }
+
+  if (block.type === "code") {
+    return (
+      <pre
+        key={index}
+        className={`max-w-full overflow-x-auto rounded-xl px-3 py-2 text-xs leading-5 ${
+          isUser ? "bg-[#203527] text-[#f4f7ee]" : "bg-mist/70 text-ink"
+        }`}
+      >
+        <code>{block.content}</code>
+      </pre>
+    );
+  }
+
+  return (
+    <p key={index} className="whitespace-pre-wrap">
+      {renderInlineMarkdown(block.lines.join("\n"), isUser)}
+    </p>
+  );
+}
+
+function parseMarkdownBlocks(content: string): MarkdownBlock[] {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let paragraph: string[] = [];
+  let codeLines: string[] = [];
+  let codeLanguage = "";
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    blocks.push({ type: "paragraph", lines: paragraph });
+    paragraph = [];
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^```(\w+)?\s*$/);
+
+    if (fence) {
+      if (inCode) {
+        blocks.push({ type: "code", language: codeLanguage, content: codeLines.join("\n") });
+        codeLines = [];
+        codeLanguage = "";
+        inCode = false;
+      } else {
+        flushParagraph();
+        inCode = true;
+        codeLanguage = fence[1] ?? "";
+      }
+      continue;
+    }
+
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      blocks.push({ type: "heading", level: heading[1].length, text: heading[2].trim() });
+      continue;
+    }
+
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    if (unordered) {
+      flushParagraph();
+      const previous = blocks[blocks.length - 1];
+      if (previous?.type === "unordered-list") {
+        previous.items.push(unordered[1].trim());
+      } else {
+        blocks.push({ type: "unordered-list", items: [unordered[1].trim()] });
+      }
+      continue;
+    }
+
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      const previous = blocks[blocks.length - 1];
+      if (previous?.type === "ordered-list") {
+        previous.items.push(ordered[1].trim());
+      } else {
+        blocks.push({ type: "ordered-list", items: [ordered[1].trim()] });
+      }
+      continue;
+    }
+
+    const quote = line.match(/^\s*>\s?(.+)$/);
+    if (quote) {
+      flushParagraph();
+      const previous = blocks[blocks.length - 1];
+      if (previous?.type === "blockquote") {
+        previous.lines.push(quote[1].trim());
+      } else {
+        blocks.push({ type: "blockquote", lines: [quote[1].trim()] });
+      }
+      continue;
+    }
+
+    paragraph.push(line);
+  }
+
+  if (inCode) {
+    blocks.push({ type: "code", language: codeLanguage, content: codeLines.join("\n") });
+  }
+  flushParagraph();
+
+  return blocks.length > 0 ? blocks : [{ type: "paragraph", lines: [content] }];
+}
+
+function renderInlineMarkdown(text: string, isUser: boolean): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\((https?:\/\/[^\s)]+)\)|\*[^*\n]+\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+
+    const token = match[0];
+    const key = `${match.index}-${token}`;
+
+    if (token.startsWith("**") && token.endsWith("**")) {
+      nodes.push(<strong key={key}>{renderInlineMarkdown(token.slice(2, -2), isUser)}</strong>);
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      nodes.push(
+        <code
+          key={key}
+          className={`rounded-md px-1 py-0.5 text-[0.9em] ${
+            isUser ? "bg-[#203527] text-[#f4f7ee]" : "bg-mist text-ink"
+          }`}
+        >
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else if (token.startsWith("[") && match[2]) {
+      const label = token.slice(1, token.indexOf("]("));
+      const href = sanitizeMarkdownHref(match[2]);
+      nodes.push(
+        href ? (
+          <a
+            key={key}
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-4"
+          >
+            {label}
+          </a>
+        ) : (
+          label
+        ),
+      );
+    } else if (token.startsWith("*") && token.endsWith("*")) {
+      nodes.push(<em key={key}>{renderInlineMarkdown(token.slice(1, -1), isUser)}</em>);
+    } else {
+      nodes.push(token);
+    }
+
+    lastIndex = match.index + token.length;
+  }
+
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+function sanitizeMarkdownHref(href: string) {
+  try {
+    const url = new URL(href);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
 }
 
 function formatMemoryDate(value: string): string {

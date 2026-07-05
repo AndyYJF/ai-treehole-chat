@@ -6,7 +6,7 @@ export type ChatMessage = {
   content: string;
 };
 
-type DeepSeekOperation = "chat" | "memory_extract" | "title_summarize";
+type DeepSeekOperation = "chat" | "memory_extract" | "title_summarize" | "reality_search_decision";
 
 export type DeepSeekStreamChunk =
   | { type: "content"; delta: string }

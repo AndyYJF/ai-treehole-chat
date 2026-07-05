@@ -12,6 +12,9 @@ type SetupForm = {
   siliconFlowApiKey: string;
   siliconFlowBaseUrl: string;
   siliconFlowRerankModel: string;
+  tavilyApiKey: string;
+  braveSearchApiKey: string;
+  realityCountryCode: string;
 };
 
 const steps = [
@@ -29,6 +32,9 @@ const initialForm: SetupForm = {
   siliconFlowApiKey: "",
   siliconFlowBaseUrl: "https://api.siliconflow.cn/v1",
   siliconFlowRerankModel: "Qwen/Qwen3-Reranker-0.6B",
+  tavilyApiKey: "",
+  braveSearchApiKey: "",
+  realityCountryCode: "CN",
 };
 
 function getInitialForm(): SetupForm {
@@ -49,7 +55,11 @@ export function SetupWizard() {
   const canContinue = useMemo(() => {
     if (step === 0) return form.treeholeAccessToken.trim().length >= 8;
     if (step === 1) return form.deepseekApiKey.trim().length >= 8 && isUrl(form.deepseekBaseUrl);
-    return isUrl(form.siliconFlowBaseUrl) && form.siliconFlowRerankModel.trim().length > 0;
+    return (
+      isUrl(form.siliconFlowBaseUrl) &&
+      form.siliconFlowRerankModel.trim().length > 0 &&
+      /^[A-Za-z]{2}$/.test(form.realityCountryCode.trim())
+    );
   }, [form, step]);
 
   function update<Key extends keyof SetupForm>(key: Key, value: SetupForm[Key]) {
@@ -197,6 +207,28 @@ export function SetupWizard() {
                 label="Rerank Model"
                 value={form.siliconFlowRerankModel}
                 onChange={(value) => update("siliconFlowRerankModel", value)}
+              />
+              <Field
+                label="Tavily Search Key"
+                value={form.tavilyApiKey}
+                onChange={(value) => update("tavilyApiKey", value)}
+                type="password"
+                autoComplete="off"
+                placeholder="可留空"
+              />
+              <Field
+                label="Brave Search Key"
+                value={form.braveSearchApiKey}
+                onChange={(value) => update("braveSearchApiKey", value)}
+                type="password"
+                autoComplete="off"
+                placeholder="可留空"
+              />
+              <Field
+                label="现实地区代码"
+                value={form.realityCountryCode}
+                onChange={(value) => update("realityCountryCode", value.toUpperCase())}
+                placeholder="CN"
               />
             </div>
           ) : null}

@@ -14,6 +14,9 @@ const setupSchema = z.object({
   siliconFlowApiKey: z.string().max(300).optional().or(z.literal("")),
   siliconFlowBaseUrl: z.string().url().default("https://api.siliconflow.cn/v1"),
   siliconFlowRerankModel: z.string().min(1).max(120).default("Qwen/Qwen3-Reranker-0.6B"),
+  tavilyApiKey: z.string().max(300).optional().or(z.literal("")),
+  braveSearchApiKey: z.string().max(300).optional().or(z.literal("")),
+  realityCountryCode: z.string().length(2).default("CN"),
 });
 
 export async function GET() {
@@ -26,6 +29,7 @@ export async function GET() {
       deepseekBaseUrl: config.deepseekBaseUrl,
       siliconFlowBaseUrl: config.siliconFlowBaseUrl,
       siliconFlowRerankModel: config.siliconFlowRerankModel,
+      realityCountryCode: config.realityCountryCode,
     },
   });
 }

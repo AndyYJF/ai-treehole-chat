@@ -119,18 +119,11 @@ html[data-theme="dark"] {
 body {
   color: var(--color-ink);
   font-family: var(--font-sans);
-  background:
-    radial-gradient(60rem 42rem at 88% -12%, rgba(107, 141, 102, 0.14), transparent 62%),
-    radial-gradient(46rem 36rem at -12% 108%, rgba(178, 148, 96, 0.11), transparent 58%),
-    var(--color-paper);
-  background-attachment: fixed;
+  background: var(--color-paper);
 }
 
 html[data-theme="dark"] body {
-  background:
-    radial-gradient(58rem 40rem at 90% -14%, rgba(135, 169, 120, 0.13), transparent 62%),
-    radial-gradient(42rem 34rem at -16% 106%, rgba(223, 139, 111, 0.08), transparent 58%),
-    var(--color-paper);
+  background: var(--color-paper);
 }
 
 .react-flow {

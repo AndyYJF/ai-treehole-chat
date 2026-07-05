@@ -6,6 +6,7 @@ import { selectRelevantMemories } from "./memory/rerank";
 import type { MemoryCandidate, MemoryRecord } from "./memory/types";
 import { routeModel, type ModelTier, type RoutedModel } from "./model-routing";
 import { buildChatMessages } from "./prompt";
+import { buildRealityContext } from "./reality-context";
 
 type RecentMessage = { role: "user" | "assistant"; content: string; createdAt?: string };
 
@@ -22,6 +23,7 @@ export type PreparedChatTurn = {
   messageId: string;
   routed: RoutedModel;
   memories: MemoryRecord[];
+  realityContext: string;
   promptMessages: ChatMessage[];
 };
 
@@ -35,6 +37,7 @@ const ChatTurnState = Annotation.Root({
   messageId: Annotation<string>(),
   routed: Annotation<RoutedModel>(),
   memories: Annotation<MemoryRecord[]>(),
+  realityContext: Annotation<string>(),
   promptMessages: Annotation<ChatMessage[]>(),
   reply: Annotation<string>(),
   memoryCandidates: Annotation<MemoryCandidate[]>(),
@@ -70,9 +73,17 @@ async function retrieveMemories(state: typeof ChatTurnState.State) {
 }
 
 async function composePrompt(state: typeof ChatTurnState.State) {
+  const realityContext = await buildRealityContext({
+    userId: state.userId,
+    latestMessage: state.message,
+    recentMessages: state.recentMessages,
+  });
+
   return {
+    realityContext,
     promptMessages: buildChatMessages({
       memories: state.memories,
+      realityContext,
       threadSummary: "",
       recentMessages: state.recentMessages.slice(-12),
       latestMessage: state.message,
@@ -139,6 +150,7 @@ export async function runChatTurn(input: ChatEngineInput) {
     ...input,
     messageId: "",
     memories: [],
+    realityContext: "",
     promptMessages: [],
     reply: "",
     memoryCandidates: [],
@@ -165,8 +177,14 @@ export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedC
     query: input.message,
     memories: allMemories,
   });
+  const realityContext = await buildRealityContext({
+    userId: input.userId,
+    latestMessage: input.message,
+    recentMessages: input.recentMessages,
+  });
   const promptMessages = buildChatMessages({
     memories,
+    realityContext,
     threadSummary: "",
     recentMessages: input.recentMessages.slice(-12),
     latestMessage: input.message,
@@ -177,6 +195,7 @@ export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedC
     messageId,
     routed,
     memories,
+    realityContext,
     promptMessages,
   };
 }
