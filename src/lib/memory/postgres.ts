@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
 import { getPostgresPool } from "../postgres";
 import type { MemoryCandidate, MemoryRecord } from "./types";
+import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import { sortMemoryForPrompt } from "./store";
 import type { MemoryRepository } from "./repository";
 
@@ -88,18 +89,9 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
       const pool = getPostgresPool();
       if (!pool) return this.listMemories(userId);
 
-      await pool.query(
-        `update memories
-        set type = $3,
-          content = $4,
-          importance = $5,
-          sensitivity = $6,
-          user_confirmed = true,
-          confidence = greatest(confidence, 0.9),
-          last_seen_at = now()
-        where user_id = $1 and id = $2`,
-        [userId, memoryId, update.type, update.content.trim(), update.importance, update.sensitivity],
-      );
+      await withTransaction(async (client) => {
+        await updateMemoryRecord(client, userId, memoryId, update);
+      });
 
       return this.listMemories(userId);
     },
@@ -120,6 +112,27 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
 
       await pool.query("delete from memories where user_id = $1", [userId]);
       return [];
+    },
+
+    async maintainMemories(userId) {
+      await ensureInitialized(userId);
+
+      await withTransaction(async (client) => {
+        const existing = await listValidMemories(client, userId);
+        const maintained = maintainMemoryRecords(existing);
+        const maintainedIds = new Set(maintained.map((memory) => memory.id));
+
+        for (const memory of maintained) {
+          await writeMergedMemory(client, userId, memory);
+        }
+
+        for (const memory of existing) {
+          if (maintainedIds.has(memory.id)) continue;
+          await client.query("delete from memories where user_id = $1 and id = $2", [userId, memory.id]);
+        }
+      });
+
+      return this.listMemories(userId);
     },
 
     async getMemorySettings(userId) {
@@ -231,35 +244,160 @@ async function ensureSchema() {
 }
 
 async function upsertMemoryCandidate(client: PoolClient, userId: string, candidate: MemoryCandidate) {
+  const now = new Date().toISOString();
+  const existing = await listValidMemories(client, userId);
+  const target = findMergeTarget(existing, candidate);
+  const incoming = memoryRecordFromCandidate(userId, candidate, now);
+
+  if (target) {
+    await writeMergedMemory(client, userId, mergeMemoryRecord(target, incoming));
+    return;
+  }
+
   await client.query(
     `insert into memories (
       id, user_id, type, content, confidence, importance, sensitivity,
       source_message_ids, user_confirmed, valid_from, valid_until, created_at, last_seen_at
     )
-    values ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10, now(), now())
+    values ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10, $11, $12)
     on conflict (user_id, type, content)
     do update set
       confidence = greatest(memories.confidence, excluded.confidence),
       importance = greatest(memories.importance, excluded.importance),
+      sensitivity = case
+        when memories.sensitivity = 'private' or excluded.sensitivity = 'private' then 'private'
+        when memories.sensitivity = 'sensitive' or excluded.sensitivity = 'sensitive' then 'sensitive'
+        else 'normal'
+      end,
       source_message_ids = (
         select coalesce(jsonb_agg(distinct value), '[]'::jsonb)
         from jsonb_array_elements_text(memories.source_message_ids || excluded.source_message_ids) as source(value)
       ),
+      user_confirmed = memories.user_confirmed or excluded.user_confirmed,
+      valid_from = coalesce(least(memories.valid_from, excluded.valid_from), memories.valid_from, excluded.valid_from),
       valid_until = excluded.valid_until,
-      last_seen_at = now()`,
+      last_seen_at = excluded.last_seen_at`,
     [
-      `mem-${randomUUID()}`,
+      incoming.id,
       userId,
-      candidate.type,
-      candidate.content.trim(),
-      candidate.confidence,
-      candidate.importance,
-      candidate.sensitivity,
-      JSON.stringify(candidate.sourceMessageIds),
-      candidate.validFrom,
-      candidate.validUntil,
+      incoming.type,
+      incoming.content,
+      incoming.confidence,
+      incoming.importance,
+      incoming.sensitivity,
+      JSON.stringify(incoming.sourceMessageIds),
+      incoming.validFrom,
+      incoming.validUntil,
+      incoming.createdAt,
+      incoming.lastSeenAt,
     ],
   );
+}
+
+async function updateMemoryRecord(
+  client: PoolClient,
+  userId: string,
+  memoryId: string,
+  update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
+) {
+  const existing = await listValidMemories(client, userId);
+  const current = existing.find((memory) => memory.id === memoryId);
+  if (!current) return;
+
+  const now = new Date().toISOString();
+  const incoming: MemoryRecord = {
+    ...current,
+    type: update.type,
+    content: update.content.trim(),
+    importance: update.importance,
+    sensitivity: update.sensitivity,
+    confidence: Math.max(current.confidence, 0.9),
+    userConfirmed: true,
+    lastSeenAt: now,
+  };
+  const target = findMergeTarget(existing, incoming, memoryId);
+
+  if (target) {
+    await writeMergedMemory(client, userId, mergeMemoryRecord(target, incoming));
+    await client.query("delete from memories where user_id = $1 and id = $2", [userId, memoryId]);
+    return;
+  }
+
+  await client.query(
+    `update memories
+    set type = $3,
+      content = $4,
+      importance = $5,
+      sensitivity = $6,
+      user_confirmed = true,
+      confidence = greatest(confidence, 0.9),
+      last_seen_at = now()
+    where user_id = $1 and id = $2`,
+    [userId, memoryId, incoming.type, incoming.content, incoming.importance, incoming.sensitivity],
+  );
+}
+
+async function listValidMemories(client: PoolClient, userId: string): Promise<MemoryRecord[]> {
+  const { rows } = await client.query(
+    `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
+      user_confirmed, valid_from, valid_until, created_at, last_seen_at
+    from memories
+    where user_id = $1 and valid_until is null`,
+    [userId],
+  );
+
+  return rows.map(memoryFromRow);
+}
+
+async function writeMergedMemory(client: PoolClient, userId: string, memory: MemoryRecord) {
+  await client.query(
+    `update memories
+    set type = $3,
+      content = $4,
+      confidence = $5,
+      importance = $6,
+      sensitivity = $7,
+      source_message_ids = $8,
+      user_confirmed = $9,
+      valid_from = $10,
+      valid_until = $11,
+      created_at = $12,
+      last_seen_at = $13
+    where user_id = $1 and id = $2`,
+    [
+      userId,
+      memory.id,
+      memory.type,
+      memory.content.trim(),
+      memory.confidence,
+      memory.importance,
+      memory.sensitivity,
+      JSON.stringify(memory.sourceMessageIds),
+      memory.userConfirmed,
+      memory.validFrom,
+      memory.validUntil,
+      memory.createdAt,
+      memory.lastSeenAt,
+    ],
+  );
+}
+
+function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, now: string): MemoryRecord {
+  return {
+    id: `mem-${randomUUID()}`,
+    userId,
+    type: candidate.type,
+    content: candidate.content.trim(),
+    confidence: candidate.confidence,
+    importance: candidate.importance,
+    sensitivity: candidate.sensitivity,
+    sourceMessageIds: candidate.sourceMessageIds,
+    userConfirmed: false,
+    validFrom: candidate.validFrom,
+    validUntil: candidate.validUntil,
+    createdAt: now,
+    lastSeenAt: now,
+  };
 }
 
 async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {

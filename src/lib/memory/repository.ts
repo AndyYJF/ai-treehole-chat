@@ -1,5 +1,7 @@
+import { randomUUID } from "crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createPostgresMemoryRepository } from "./postgres";
+import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 import {
   addMemoryCandidates as addMemoryCandidatesInMemory,
@@ -7,6 +9,7 @@ import {
   confirmMemory as confirmMemoryInMemory,
   deleteMemory as deleteMemoryInMemory,
   getMemorySettings as getMemorySettingsInMemory,
+  maintainMemories as maintainMemoriesInMemory,
   listMemories as listMemoriesInMemory,
   setMemoryEnabled as setMemoryEnabledInMemory,
   sortMemoryForPrompt,
@@ -24,6 +27,7 @@ export type MemoryRepository = {
   updateMemory(userId: string, memoryId: string, update: MemoryUpdate): Promise<MemoryRecord[]>;
   deleteMemory(userId: string, memoryId: string): Promise<MemoryRecord[]>;
   clearMemories(userId: string): Promise<MemoryRecord[]>;
+  maintainMemories(userId: string): Promise<MemoryRecord[]>;
   getMemorySettings(userId: string): Promise<MemorySettings>;
   setMemoryEnabled(userId: string, enabled: boolean): Promise<MemorySettings>;
 };
@@ -77,6 +81,9 @@ const inMemoryMemoryRepository: MemoryRepository = {
   async clearMemories(userId) {
     return clearMemoriesInMemory(userId);
   },
+  async maintainMemories(userId) {
+    return maintainMemoriesInMemory(userId);
+  },
   async getMemorySettings(userId) {
     return getMemorySettingsInMemory(userId);
   },
@@ -104,23 +111,30 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       if (candidates.length === 0) return this.listMemories(userId);
 
       const now = new Date().toISOString();
-      const rows = candidates.map((candidate) => ({
-        user_id: userId,
-        type: candidate.type,
-        content: candidate.content,
-        confidence: candidate.confidence,
-        importance: candidate.importance,
-        sensitivity: candidate.sensitivity,
-        source_message_ids: candidate.sourceMessageIds,
-        user_confirmed: false,
-        valid_from: candidate.validFrom,
-        valid_until: candidate.validUntil,
-        created_at: now,
-        last_seen_at: now,
-      }));
+      let existing = await this.listMemories(userId);
 
-      const { error } = await client.from("memories").insert(rows);
-      if (error) throw new Error(`Failed to add memories: ${error.message}`);
+      for (const candidate of candidates) {
+        const incoming = memoryRecordFromCandidate(userId, candidate, now);
+        const target = findMergeTarget(existing, incoming);
+
+        if (target) {
+          const merged = mergeMemoryRecord(target, incoming);
+          const { error } = await client
+            .from("memories")
+            .update(memoryToSupabaseUpdate(merged))
+            .eq("user_id", userId)
+            .eq("id", target.id);
+
+          if (error) throw new Error(`Failed to merge memory: ${error.message}`);
+          existing = existing.map((memory) => (memory.id === target.id ? merged : memory));
+          continue;
+        }
+
+        const { error } = await client.from("memories").insert(memoryToSupabaseInsert(incoming));
+        if (error) throw new Error(`Failed to add memories: ${error.message}`);
+        existing = [...existing, incoming];
+      }
+
       return this.listMemories(userId);
     },
 
@@ -142,19 +156,39 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
 
     async updateMemory(userId, memoryId, update) {
       const now = new Date().toISOString();
-      const { error } = await client
-        .from("memories")
-        .update({
-          type: update.type,
-          content: update.content.trim(),
-          importance: update.importance,
-          sensitivity: update.sensitivity,
-          user_confirmed: true,
-          confidence: 0.9,
-          last_seen_at: now,
-        })
-        .eq("user_id", userId)
-        .eq("id", memoryId);
+      const existing = await this.listMemories(userId);
+      const current = existing.find((memory) => memory.id === memoryId);
+      if (!current) return existing;
+
+      const incoming: MemoryRecord = {
+        ...current,
+        type: update.type,
+        content: update.content.trim(),
+        importance: update.importance,
+        sensitivity: update.sensitivity,
+        userConfirmed: true,
+        confidence: Math.max(current.confidence, 0.9),
+        lastSeenAt: now,
+      };
+      const target = findMergeTarget(existing, incoming, memoryId);
+
+      if (target) {
+        const merged = mergeMemoryRecord(target, incoming);
+        const { error: updateError } = await client
+          .from("memories")
+          .update(memoryToSupabaseUpdate(merged))
+          .eq("user_id", userId)
+          .eq("id", target.id);
+
+        if (updateError) throw new Error(`Failed to merge memory: ${updateError.message}`);
+
+        const { error: deleteError } = await client.from("memories").delete().eq("user_id", userId).eq("id", memoryId);
+        if (deleteError) throw new Error(`Failed to merge memory: ${deleteError.message}`);
+
+        return this.listMemories(userId);
+      }
+
+      const { error } = await client.from("memories").update(memoryToSupabaseUpdate(incoming)).eq("user_id", userId).eq("id", memoryId);
 
       if (error) throw new Error(`Failed to update memory: ${error.message}`);
       return this.listMemories(userId);
@@ -170,6 +204,31 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       const { error } = await client.from("memories").delete().eq("user_id", userId);
       if (error) throw new Error(`Failed to clear memories: ${error.message}`);
       return [];
+    },
+
+    async maintainMemories(userId) {
+      const memories = await this.listMemories(userId);
+      const maintained = maintainMemoryRecords(memories);
+      const maintainedIds = new Set(maintained.map((memory) => memory.id));
+
+      for (const memory of maintained) {
+        const { error } = await client
+          .from("memories")
+          .update(memoryToSupabaseUpdate(memory))
+          .eq("user_id", userId)
+          .eq("id", memory.id);
+
+        if (error) throw new Error(`Failed to maintain memories: ${error.message}`);
+      }
+
+      for (const memory of memories) {
+        if (maintainedIds.has(memory.id)) continue;
+
+        const { error } = await client.from("memories").delete().eq("user_id", userId).eq("id", memory.id);
+        if (error) throw new Error(`Failed to maintain memories: ${error.message}`);
+      }
+
+      return this.listMemories(userId);
     },
 
     async getMemorySettings(userId) {
@@ -196,6 +255,58 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       if (error) throw new Error(`Failed to update memory settings: ${error.message}`);
       return { enabled };
     },
+  };
+}
+
+function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, now: string): MemoryRecord {
+  return {
+    id: `mem-${randomUUID()}`,
+    userId,
+    type: candidate.type,
+    content: candidate.content.trim(),
+    confidence: candidate.confidence,
+    importance: candidate.importance,
+    sensitivity: candidate.sensitivity,
+    sourceMessageIds: candidate.sourceMessageIds,
+    userConfirmed: false,
+    validFrom: candidate.validFrom,
+    validUntil: candidate.validUntil,
+    createdAt: now,
+    lastSeenAt: now,
+  };
+}
+
+function memoryToSupabaseInsert(memory: MemoryRecord) {
+  return {
+    id: memory.id,
+    user_id: memory.userId,
+    type: memory.type,
+    content: memory.content,
+    confidence: memory.confidence,
+    importance: memory.importance,
+    sensitivity: memory.sensitivity,
+    source_message_ids: memory.sourceMessageIds,
+    user_confirmed: memory.userConfirmed,
+    valid_from: memory.validFrom,
+    valid_until: memory.validUntil,
+    created_at: memory.createdAt,
+    last_seen_at: memory.lastSeenAt,
+  };
+}
+
+function memoryToSupabaseUpdate(memory: MemoryRecord) {
+  return {
+    type: memory.type,
+    content: memory.content.trim(),
+    confidence: memory.confidence,
+    importance: memory.importance,
+    sensitivity: memory.sensitivity,
+    source_message_ids: memory.sourceMessageIds,
+    user_confirmed: memory.userConfirmed,
+    valid_from: memory.validFrom,
+    valid_until: memory.validUntil,
+    created_at: memory.createdAt,
+    last_seen_at: memory.lastSeenAt,
   };
 }
 

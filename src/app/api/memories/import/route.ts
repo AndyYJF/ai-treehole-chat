@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { analyzeImportedConversation } from "@/lib/memory/import";
+import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { memoryTypeSchema, sensitivitySchema } from "@/lib/memory/types";
 import { getServerUserId } from "@/lib/server-user";
@@ -48,19 +49,28 @@ export async function POST(request: Request) {
     }
 
     const repository = getMemoryRepository();
-    const now = new Date().toISOString();
-    return NextResponse.json({
-      memories: await repository.addMemoryCandidates(
+    const now = toUtc8IsoString(new Date());
+    const memories = await repository.addMemoryCandidates(
         userId,
         body.candidates.map((candidate) => ({
           ...candidate,
           validFrom: candidate.validFrom ?? now,
         })),
-      ),
+      );
+    void maybeMaintainMemories({ userId, force: true });
+
+    return NextResponse.json({
+      memories,
       settings: await repository.getMemorySettings(userId),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 400 });
   }
+}
+
+function toUtc8IsoString(date: Date): string {
+  const utc8Time = date.getTime() + 8 * 60 * 60 * 1000;
+  const shifted = new Date(utc8Time);
+  return `${shifted.toISOString().slice(0, 19)}+08:00`;
 }

@@ -23,6 +23,7 @@ import {
   Network,
   PenLine,
   Plus,
+  RefreshCw,
   Send,
   Settings,
   ShieldCheck,
@@ -196,6 +197,7 @@ export function ChatShell() {
   const [importError, setImportError] = useState("");
   const [isAnalyzingImport, setIsAnalyzingImport] = useState(false);
   const [isAddingImport, setIsAddingImport] = useState(false);
+  const [isMaintainingMemories, setIsMaintainingMemories] = useState(false);
   const [memoryEnabled, setMemoryEnabledState] = useState(true);
   const [temperature, setTemperature] = useState(0.72);
   const [routeLabel, setRouteLabel] = useState("自动");
@@ -408,6 +410,35 @@ export function ChatShell() {
 
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+  }
+
+  async function maintainMemoriesNow() {
+    if (isMaintainingMemories) return;
+
+    setIsMaintainingMemories(true);
+
+    try {
+      const response = await fetch("/api/memories", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "maintain" }),
+      });
+
+      if (!response.ok) throw new Error("maintain failed");
+
+      const data = (await response.json()) as {
+        memories: MemoryRecord[];
+        settings: { enabled: boolean };
+      };
+
+      setMemories(data.memories);
+      setMemoryEnabledState(data.settings.enabled);
+      showNotice("记忆已维护。");
+    } catch {
+      showNotice("记忆维护没有完成，再试一次。");
+    } finally {
+      setIsMaintainingMemories(false);
+    }
   }
 
   function resetMemoryImport() {
@@ -1244,6 +1275,19 @@ export function ChatShell() {
                 title="导入对话"
               >
                 <Upload size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void maintainMemoriesNow()}
+                disabled={isMaintainingMemories}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-faint transition hover:bg-mist hover:text-pine disabled:cursor-not-allowed disabled:text-line-strong"
+                aria-label="维护记忆"
+                title="维护记忆"
+              >
+                <RefreshCw
+                  size={14}
+                  className={isMaintainingMemories ? "animate-spin" : ""}
+                />
               </button>
               {memories.length > 0 ? (
                 <>

@@ -40,6 +40,7 @@ export function buildChatMessages(input: {
   latestMessage: string;
   latestMessageCreatedAt?: string;
 }) {
+  const now = new Date();
   const memoryBlock = formatMemoryBlock(input.memories);
   const summary = input.threadSummary || "暂无会话摘要。";
 
@@ -58,11 +59,11 @@ export function buildChatMessages(input: {
     },
     ...input.recentMessages.map((message) => ({
       role: message.role,
-      content: withTimestamp(message.content, message.createdAt),
+      content: withTimestamp(message.content, message.createdAt, now),
     })),
     {
       role: "user" as const,
-      content: withTimestamp(input.latestMessage, input.latestMessageCreatedAt),
+      content: withTimestamp(input.latestMessage, input.latestMessageCreatedAt, now),
     },
   ];
 }
@@ -70,27 +71,35 @@ export function buildChatMessages(input: {
 function formatMemoryBlock(memories: MemoryRecord[]): string {
   if (memories.length === 0) return "暂无长期记忆。";
 
+  const now = new Date();
   return memories
     .slice(0, 12)
     .map((memory) => {
       const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
       return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
         memory.createdAt,
-      )}/lastSeen:${formatContextTime(memory.lastSeenAt)}${memory.validFrom ? `/validFrom:${formatContextTime(memory.validFrom)}` : ""}] ${
-        memory.content
-      }`;
+        now,
+      )}/lastSeen:${formatContextTime(memory.lastSeenAt, now)}/validFrom:${formatContextTime(
+        memory.validFrom,
+        now,
+      )}] ${memory.content}`;
     })
     .join("\n");
 }
 
-function withTimestamp(content: string, createdAt?: string): string {
-  if (!createdAt) return content;
-  return `[时间：${formatContextTime(createdAt)}]\n${content}`;
+function withTimestamp(content: string, createdAt: string | undefined, fallback: Date): string {
+  return `[时间：${formatContextTime(createdAt, fallback)}]\n${content}`;
 }
 
-function formatContextTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toISOString();
+function formatContextTime(value: string | null | undefined, fallback: Date): string {
+  const date = value ? new Date(value) : fallback;
+  if (Number.isNaN(date.getTime())) return value ?? toUtc8IsoString(fallback);
+  return toUtc8IsoString(date);
+}
+
+function toUtc8IsoString(date: Date): string {
+  const utc8Time = date.getTime() + 8 * 60 * 60 * 1000;
+  const shifted = new Date(utc8Time);
+  return `${shifted.toISOString().slice(0, 19)}+08:00`;
 }
 

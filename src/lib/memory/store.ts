@@ -1,4 +1,5 @@
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
+import { findMergeTarget, mergeMemoryRecord } from "./merge";
 
 const memoryStore = new Map<string, MemoryRecord[]>();
 const memorySettingsStore = new Map<string, { enabled: boolean }>();
@@ -116,6 +117,12 @@ export function updateMemory(userId: string, memoryId: string, update: MemoryUpd
   return listMemories(userId);
 }
 
+export function maintainMemories(userId: string): MemoryRecord[] {
+  const maintained = mergeMemoryRecords(listMemories(userId)).slice(0, 80);
+  memoryStore.set(userId, maintained);
+  return listMemories(userId);
+}
+
 export function deleteMemory(userId: string, memoryId: string): MemoryRecord[] {
   const updated = listMemories(userId).filter((memory) => memory.id !== memoryId);
   memoryStore.set(userId, updated);
@@ -127,20 +134,22 @@ export function clearMemories(userId: string): MemoryRecord[] {
   return [];
 }
 
-function mergeMemoryRecords(records: MemoryRecord[]): MemoryRecord[] {
+export function mergeMemoryRecords(records: MemoryRecord[]): MemoryRecord[] {
   const byContent = new Map<string, MemoryRecord>();
 
   for (const record of records) {
-    const key = `${record.type}:${record.content.trim()}`;
-    const previous = byContent.get(key);
+    const current = [...byContent.values()];
+    const target = findMergeTarget(current, record);
 
-    if (!previous || record.confidence > previous.confidence || record.lastSeenAt > previous.lastSeenAt) {
-      byContent.set(key, {
-        ...record,
-        confidence: Math.max(record.confidence, previous?.confidence ?? 0),
-        sourceMessageIds: Array.from(new Set([...(previous?.sourceMessageIds ?? []), ...record.sourceMessageIds])),
-      });
+    if (target) {
+      byContent.set(target.id, mergeMemoryRecord(target, record));
+      continue;
     }
+
+    byContent.set(record.id, {
+      ...record,
+      content: record.content.trim(),
+    });
   }
 
   return Array.from(byContent.values()).sort(sortMemoryForPrompt).slice(0, 80);

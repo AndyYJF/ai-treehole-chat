@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiSession } from "@/lib/auth-runtime";
+import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { memoryTypeSchema, sensitivitySchema } from "@/lib/memory/types";
 import { getServerUserId } from "@/lib/server-user";
@@ -28,6 +29,9 @@ const memoryPatchSchema = z.discriminatedUnion("action", [
     action: z.literal("setEnabled"),
     enabled: z.boolean(),
   }),
+  z.object({
+    action: z.literal("maintain"),
+  }),
 ]);
 
 export async function GET(request: Request) {
@@ -36,6 +40,7 @@ export async function GET(request: Request) {
 
   const userId = getServerUserId();
   const repository = getMemoryRepository();
+  void maybeMaintainMemories({ userId });
 
   return NextResponse.json({
     memories: await repository.listMemories(userId),
@@ -74,6 +79,13 @@ export async function PATCH(request: Request) {
     if (body.action === "delete") {
       return NextResponse.json({
         memories: await repository.deleteMemory(userId, body.memoryId),
+        settings: await repository.getMemorySettings(userId),
+      });
+    }
+
+    if (body.action === "maintain") {
+      return NextResponse.json({
+        memories: await repository.maintainMemories(userId),
         settings: await repository.getMemorySettings(userId),
       });
     }

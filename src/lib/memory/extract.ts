@@ -43,7 +43,7 @@ async function extractWithModel(input: {
   messageId: string;
   userMessage: string;
 }): Promise<MemoryCandidate[]> {
-  const today = new Date().toISOString();
+  const today = toUtc8IsoString(new Date());
   const json = await callDeepSeekJson({
     userId: input.userId,
     operation: "memory_extract",
@@ -132,4 +132,10 @@ function toShortMemory(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   if (compact.length <= 72) return compact;
   return `${compact.slice(0, 70)}...`;
+}
+
+function toUtc8IsoString(date: Date): string {
+  const utc8Time = date.getTime() + 8 * 60 * 60 * 1000;
+  const shifted = new Date(utc8Time);
+  return `${shifted.toISOString().slice(0, 19)}+08:00`;
 }

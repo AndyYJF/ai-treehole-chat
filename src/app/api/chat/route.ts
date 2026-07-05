@@ -10,6 +10,7 @@ import {
 import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine";
 import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
+import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { modelTierSchema } from "@/lib/model-routing";
 import { getServerUserId } from "@/lib/server-user";
 import { summarizeThreadTitle } from "@/lib/thread-title";
@@ -40,6 +41,7 @@ export async function POST(request: Request) {
   try {
     const body = chatRequestSchema.parse(await request.json());
     const userId = getServerUserId();
+    void maybeMaintainMemories({ userId });
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
     const isFirstTurn = serverMessages.length === 0;

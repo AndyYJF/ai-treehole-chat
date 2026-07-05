@@ -72,7 +72,7 @@ async function extractImportedMemoriesWithModel(input: {
   sourceName: string;
   sourceText: string;
 }): Promise<MemoryCandidate[]> {
-  const today = new Date().toISOString();
+  const today = toUtc8IsoString(new Date());
   const json = await callDeepSeekJson({
     userId: input.userId,
     operation: "memory_extract",
@@ -273,4 +273,10 @@ function dedupeCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
   }
 
   return [...byKey.values()].sort((a, b) => b.importance - a.importance);
+}
+
+function toUtc8IsoString(date: Date): string {
+  const utc8Time = date.getTime() + 8 * 60 * 60 * 1000;
+  const shifted = new Date(utc8Time);
+  return `${shifted.toISOString().slice(0, 19)}+08:00`;
 }
