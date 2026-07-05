@@ -38,3 +38,5 @@ export type MemoryCandidate = Pick<
   sourceMessageIds: string[];
 };
 
+export type MemoryUpdate = Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">;
+

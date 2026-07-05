@@ -51,6 +51,7 @@ export async function POST(request: Request) {
       recentMessages: serverMessages.slice(-12).map((message) => ({
         role: message.role,
         content: message.content,
+        createdAt: message.createdAt,
       })),
     };
 
@@ -98,7 +99,7 @@ function createChatStream(
     threadId: string;
     userId: string;
     isFirstTurn: boolean;
-    recentMessages: Array<{ role: "user" | "assistant"; content: string }>;
+    recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
   },
   signal: AbortSignal,
 ) {

@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createPostgresMemoryRepository } from "./postgres";
-import type { MemoryCandidate, MemoryRecord } from "./types";
+import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 import {
   addMemoryCandidates as addMemoryCandidatesInMemory,
   clearMemories as clearMemoriesInMemory,
@@ -10,6 +10,7 @@ import {
   listMemories as listMemoriesInMemory,
   setMemoryEnabled as setMemoryEnabledInMemory,
   sortMemoryForPrompt,
+  updateMemory as updateMemoryInMemory,
 } from "./store";
 
 export type MemorySettings = {
@@ -20,6 +21,7 @@ export type MemoryRepository = {
   listMemories(userId: string): Promise<MemoryRecord[]>;
   addMemoryCandidates(userId: string, candidates: MemoryCandidate[]): Promise<MemoryRecord[]>;
   confirmMemory(userId: string, memoryId: string): Promise<MemoryRecord[]>;
+  updateMemory(userId: string, memoryId: string, update: MemoryUpdate): Promise<MemoryRecord[]>;
   deleteMemory(userId: string, memoryId: string): Promise<MemoryRecord[]>;
   clearMemories(userId: string): Promise<MemoryRecord[]>;
   getMemorySettings(userId: string): Promise<MemorySettings>;
@@ -65,6 +67,9 @@ const inMemoryMemoryRepository: MemoryRepository = {
   },
   async confirmMemory(userId, memoryId) {
     return confirmMemoryInMemory(userId, memoryId);
+  },
+  async updateMemory(userId, memoryId, update) {
+    return updateMemoryInMemory(userId, memoryId, update);
   },
   async deleteMemory(userId, memoryId) {
     return deleteMemoryInMemory(userId, memoryId);
@@ -132,6 +137,26 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
         .eq("id", memoryId);
 
       if (error) throw new Error(`Failed to confirm memory: ${error.message}`);
+      return this.listMemories(userId);
+    },
+
+    async updateMemory(userId, memoryId, update) {
+      const now = new Date().toISOString();
+      const { error } = await client
+        .from("memories")
+        .update({
+          type: update.type,
+          content: update.content.trim(),
+          importance: update.importance,
+          sensitivity: update.sensitivity,
+          user_confirmed: true,
+          confidence: 0.9,
+          last_seen_at: now,
+        })
+        .eq("user_id", userId)
+        .eq("id", memoryId);
+
+      if (error) throw new Error(`Failed to update memory: ${error.message}`);
       return this.listMemories(userId);
     },
 

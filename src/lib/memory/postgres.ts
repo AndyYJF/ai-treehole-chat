@@ -82,6 +82,28 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
       return this.listMemories(userId);
     },
 
+    async updateMemory(userId, memoryId, update) {
+      await ensureInitialized(userId);
+
+      const pool = getPostgresPool();
+      if (!pool) return this.listMemories(userId);
+
+      await pool.query(
+        `update memories
+        set type = $3,
+          content = $4,
+          importance = $5,
+          sensitivity = $6,
+          user_confirmed = true,
+          confidence = greatest(confidence, 0.9),
+          last_seen_at = now()
+        where user_id = $1 and id = $2`,
+        [userId, memoryId, update.type, update.content.trim(), update.importance, update.sensitivity],
+      );
+
+      return this.listMemories(userId);
+    },
+
     async deleteMemory(userId, memoryId) {
       await ensureInitialized(userId);
       const pool = getPostgresPool();

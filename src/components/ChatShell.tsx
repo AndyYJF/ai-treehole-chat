@@ -11,9 +11,11 @@ import {
 import {
   Activity,
   Brain,
+  Check,
   ChevronDown,
   Download,
   Eye,
+  FileText,
   Leaf,
   LogOut,
   MessageSquare,
@@ -28,6 +30,7 @@ import {
   Sparkles,
   Sun,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -51,6 +54,26 @@ type Message = {
 type StoredChatMessage = Message & {
   threadId: string;
   createdAt: string;
+};
+
+type ImportedMemoryCandidate = {
+  clientId: string;
+  type: MemoryType;
+  content: string;
+  confidence: number;
+  importance: number;
+  sensitivity: "normal" | "sensitive" | "private";
+  sourceMessageIds: string[];
+  validFrom: string | null;
+  validUntil: string | null;
+};
+
+type ImportAnalysisPayload = {
+  sourceName: string;
+  messageCount: number;
+  analyzedChars: number;
+  truncated: boolean;
+  candidates: Array<Omit<ImportedMemoryCandidate, "clientId">>;
 };
 
 type ChatThread = {
@@ -133,6 +156,12 @@ const memoryTypeLabels: Record<MemoryType, string> = {
   boundary: "边界",
 };
 
+const sensitivityLabels: Record<ImportedMemoryCandidate["sensitivity"], string> = {
+  normal: "普通",
+  sensitive: "敏感",
+  private: "私密",
+};
+
 const memoryTypeOrder = Object.keys(memoryTypeLabels) as MemoryType[];
 
 const themeOptions: Array<{
@@ -155,9 +184,18 @@ export function ChatShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryView, setMemoryView] = useState<"list" | "graph">("list");
+  const [memoryImportOpen, setMemoryImportOpen] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
+  const [importSourceName, setImportSourceName] = useState("");
+  const [importContent, setImportContent] = useState("");
+  const [importCandidates, setImportCandidates] = useState<ImportedMemoryCandidate[]>([]);
+  const [selectedImportCandidateIds, setSelectedImportCandidateIds] = useState<string[]>([]);
+  const [importSummary, setImportSummary] = useState<ImportAnalysisPayload | null>(null);
+  const [importError, setImportError] = useState("");
+  const [isAnalyzingImport, setIsAnalyzingImport] = useState(false);
+  const [isAddingImport, setIsAddingImport] = useState(false);
   const [memoryEnabled, setMemoryEnabledState] = useState(true);
   const [temperature, setTemperature] = useState(0.72);
   const [routeLabel, setRouteLabel] = useState("自动");
@@ -171,6 +209,7 @@ export function ChatShell() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const thinkingTimerRef = useRef<number | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
@@ -328,6 +367,34 @@ export function ChatShell() {
     setSelectedMemoryId((current) => (current === memoryId ? null : current));
   }
 
+  async function updateMemory(
+    memoryId: string,
+    update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
+  ) {
+    const response = await fetch("/api/memories", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "update",
+        memoryId,
+        ...update,
+      }),
+    });
+
+    if (!response.ok) {
+      showNotice("记忆没有保存成功。");
+      return;
+    }
+
+    const data = (await response.json()) as {
+      memories: MemoryRecord[];
+      settings: { enabled: boolean };
+    };
+    setMemories(data.memories);
+    setMemoryEnabledState(data.settings.enabled);
+    showNotice("记忆已更新。");
+  }
+
   async function clearAllMemories() {
     if (!window.confirm("清空所有记忆？")) return;
 
@@ -341,6 +408,136 @@ export function ChatShell() {
 
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+  }
+
+  function resetMemoryImport() {
+    setImportSourceName("");
+    setImportContent("");
+    setImportCandidates([]);
+    setSelectedImportCandidateIds([]);
+    setImportSummary(null);
+    setImportError("");
+  }
+
+  async function readImportFile(file: File | undefined) {
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setImportContent(text);
+      if (!importSourceName.trim()) setImportSourceName(file.name);
+      setImportCandidates([]);
+      setSelectedImportCandidateIds([]);
+      setImportSummary(null);
+      setImportError("");
+    } catch {
+      setImportError("文件没有读出来，换一个文件试试。");
+    }
+  }
+
+  async function analyzeMemoryImport() {
+    const content = importContent.trim();
+    if (content.length < 20 || isAnalyzingImport) return;
+
+    setIsAnalyzingImport(true);
+    setImportError("");
+    setImportCandidates([]);
+    setSelectedImportCandidateIds([]);
+    setImportSummary(null);
+
+    try {
+      const response = await fetch("/api/memories/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "analyze",
+          sourceName: importSourceName,
+          content,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? "导入分析失败");
+      }
+
+      const data = (await response.json()) as ImportAnalysisPayload;
+      const candidates = data.candidates.map((candidate, index) => ({
+        ...candidate,
+        clientId: `import-${Date.now()}-${index}`,
+      }));
+
+      setImportSummary(data);
+      setImportCandidates(candidates);
+      setSelectedImportCandidateIds(candidates.map((candidate) => candidate.clientId));
+
+      if (candidates.length === 0) {
+        showNotice("没有分析出可添加的长期记忆。");
+      }
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "导入分析失败");
+    } finally {
+      setIsAnalyzingImport(false);
+    }
+  }
+
+  async function addImportedMemories() {
+    const selected = importCandidates.filter((candidate) =>
+      selectedImportCandidateIds.includes(candidate.clientId),
+    );
+
+    if (selected.length === 0 || isAddingImport) return;
+
+    setIsAddingImport(true);
+    setImportError("");
+
+    try {
+      const response = await fetch("/api/memories/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "add",
+          candidates: selected.map((candidate) => ({
+            type: candidate.type,
+            content: candidate.content,
+            confidence: candidate.confidence,
+            importance: candidate.importance,
+            sensitivity: candidate.sensitivity,
+            sourceMessageIds: candidate.sourceMessageIds,
+            validFrom: candidate.validFrom,
+            validUntil: candidate.validUntil,
+          })),
+        }),
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? "记忆没有添加成功");
+      }
+
+      const data = (await response.json()) as {
+        memories: MemoryRecord[];
+        settings: { enabled: boolean };
+      };
+
+      setMemories(data.memories);
+      setMemoryEnabledState(data.settings.enabled);
+      setMemoryImportOpen(false);
+      resetMemoryImport();
+      showNotice(`已添加 ${selected.length} 条记忆。`);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "记忆没有添加成功");
+    } finally {
+      setIsAddingImport(false);
+    }
+  }
+
+  function toggleImportedMemory(candidateId: string) {
+    setSelectedImportCandidateIds((current) =>
+      current.includes(candidateId)
+        ? current.filter((id) => id !== candidateId)
+        : [...current, candidateId],
+    );
   }
 
   async function exportData() {
@@ -1034,22 +1231,22 @@ export function ChatShell() {
 
       <SidePanel open={memoryOpen} onClose={() => setMemoryOpen(false)} title="记忆">
         <div className="space-y-3">
-          {memories.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 py-14 text-center">
-              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-mist text-ink-faint">
-                <Brain size={20} strokeWidth={1.5} />
-              </span>
-              <p className="text-sm leading-6 text-ink-faint">
-                还没有新的记忆。
-                <br />
-                聊着聊着，重要的事会自己留下来。
-              </p>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-ink-faint">共 {memories.length} 条</p>
-                <div className="flex items-center gap-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-ink-faint">共 {memories.length} 条</p>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setMemoryImportOpen((current) => !current)}
+                className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition ${
+                  memoryImportOpen ? "bg-moss text-pine-deep" : "text-ink-faint hover:bg-mist hover:text-pine"
+                }`}
+                aria-label="导入对话"
+                title="导入对话"
+              >
+                <Upload size={14} />
+              </button>
+              {memories.length > 0 ? (
+                <>
                   <ViewToggle
                     value={memoryView}
                     onChange={(next) => {
@@ -1066,13 +1263,179 @@ export function ChatShell() {
                   >
                     <Trash2 size={14} />
                   </button>
+                </>
+              ) : null}
+            </div>
+          </div>
+
+          {memoryImportOpen ? (
+            <div className="animate-rise space-y-3 rounded-2xl border border-line bg-card p-4 shadow-[0_2px_10px_rgba(63,58,38,0.05)]">
+              <input
+                ref={importFileInputRef}
+                type="file"
+                accept=".json,.txt,.md,.csv"
+                className="hidden"
+                onChange={(event) => {
+                  void readImportFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-mist text-pine">
+                  <FileText size={16} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-ink">导入外部对话</p>
+                  <p className="truncate text-xs text-ink-faint">
+                    JSON、TXT、Markdown
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => importFileInputRef.current?.click()}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-faint transition hover:bg-mist hover:text-pine"
+                  aria-label="选择文件"
+                  title="选择文件"
+                >
+                  <Upload size={14} />
+                </button>
               </div>
+
+              <input
+                value={importSourceName}
+                onChange={(event) => setImportSourceName(event.target.value)}
+                placeholder="来源名称"
+                className="h-10 w-full rounded-xl border border-line bg-paper px-3 text-sm text-ink outline-none transition placeholder:text-ink-faint focus:border-line-strong"
+              />
+              <textarea
+                value={importContent}
+                onChange={(event) => {
+                  setImportContent(event.target.value);
+                  setImportCandidates([]);
+                  setSelectedImportCandidateIds([]);
+                  setImportSummary(null);
+                  setImportError("");
+                }}
+                rows={7}
+                placeholder="粘贴外部聊天记录"
+                className="min-h-36 w-full resize-y rounded-xl border border-line bg-paper px-3 py-2.5 text-sm leading-6 text-ink outline-none transition placeholder:text-ink-faint focus:border-line-strong"
+              />
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void analyzeMemoryImport()}
+                  disabled={importContent.trim().length < 20 || isAnalyzingImport}
+                  className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-pine px-3 text-sm text-card transition hover:bg-pine-deep disabled:cursor-not-allowed disabled:bg-line-strong"
+                >
+                  <Brain size={15} />
+                  {isAnalyzingImport ? "分析中" : "分析记忆"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetMemoryImport();
+                    setMemoryImportOpen(false);
+                  }}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-line text-ink-faint transition hover:bg-mist hover:text-ink"
+                  aria-label="取消导入"
+                  title="取消导入"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+
+              {importError ? (
+                <p className="rounded-xl bg-clay-soft px-3 py-2 text-xs leading-5 text-clay">
+                  {importError}
+                </p>
+              ) : null}
+
+              {importSummary ? (
+                <div className="flex flex-wrap gap-1.5 text-[11px] text-ink-faint">
+                  <span className="rounded-full bg-mist px-2 py-0.5">
+                    {importSummary.messageCount || "未知"} 条消息
+                  </span>
+                  <span className="rounded-full bg-mist px-2 py-0.5">
+                    {formatCompact(importSummary.analyzedChars)} 字符
+                  </span>
+                  {importSummary.truncated ? (
+                    <span className="rounded-full bg-clay-soft px-2 py-0.5 text-clay">
+                      已截断
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {importCandidates.length > 0 ? (
+                <div className="space-y-2">
+                  {importCandidates.map((candidate) => {
+                    const checked = selectedImportCandidateIds.includes(candidate.clientId);
+
+                    return (
+                      <label
+                        key={candidate.clientId}
+                        className={`block cursor-pointer rounded-xl border p-3 transition ${
+                          checked ? "border-pine bg-moss/70" : "border-line bg-paper hover:border-line-strong"
+                        }`}
+                      >
+                        <span className="flex items-start gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleImportedMemory(candidate.clientId)}
+                            className="mt-1 h-4 w-4 accent-pine"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm leading-6 text-ink">
+                              {candidate.content}
+                            </span>
+                            <span className="mt-2 flex flex-wrap gap-1.5">
+                              <span className="rounded-full bg-card px-2 py-0.5 text-[11px] text-pine-deep">
+                                {memoryTypeLabels[candidate.type]}
+                              </span>
+                              <span className="rounded-full bg-card px-2 py-0.5 text-[11px] text-ink-faint">
+                                {candidate.importance}
+                              </span>
+                            </span>
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => void addImportedMemories()}
+                    disabled={selectedImportCandidateIds.length === 0 || isAddingImport}
+                    className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-pine px-3 text-sm text-card transition hover:bg-pine-deep disabled:cursor-not-allowed disabled:bg-line-strong"
+                  >
+                    <Check size={15} />
+                    {isAddingImport ? "添加中" : `添加选中的 ${selectedImportCandidateIds.length} 条`}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {memories.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 py-14 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-mist text-ink-faint">
+                <Brain size={20} strokeWidth={1.5} />
+              </span>
+              <p className="text-sm leading-6 text-ink-faint">
+                还没有新的记忆。
+                <br />
+                聊着聊着，重要的事会自己留下来。
+              </p>
+            </div>
+          ) : (
+            <>
               {memoryView === "graph" ? (
                 <MemoryGraph
                   memories={memories}
                   selectedMemoryId={selectedMemoryId}
                   onSelectMemory={setSelectedMemoryId}
+                  onUpdateMemory={(memoryId, update) => void updateMemory(memoryId, update)}
                   onDeleteMemory={(memoryId) => void deleteMemory(memoryId)}
                 />
               ) : (
@@ -1080,6 +1443,7 @@ export function ChatShell() {
                   <MemoryCard
                     key={memory.id}
                     memory={memory}
+                    onUpdate={(update) => void updateMemory(memory.id, update)}
                     onDelete={() => void deleteMemory(memory.id)}
                   />
                 ))
@@ -1131,16 +1495,126 @@ function ViewToggle({
 
 function MemoryCard({
   memory,
+  onUpdate,
   onDelete,
 }: {
   memory: MemoryRecord;
+  onUpdate: (update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">) => void;
   onDelete: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [content, setContent] = useState(memory.content);
+  const [type, setType] = useState<MemoryType>(memory.type);
+  const [importance, setImportance] = useState(memory.importance);
+  const [sensitivity, setSensitivity] = useState<MemoryRecord["sensitivity"]>(memory.sensitivity);
+
+  function startEdit() {
+    setContent(memory.content);
+    setType(memory.type);
+    setImportance(memory.importance);
+    setSensitivity(memory.sensitivity);
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setContent(memory.content);
+    setType(memory.type);
+    setImportance(memory.importance);
+    setSensitivity(memory.sensitivity);
+    setEditing(false);
+  }
+
+  function saveEdit() {
+    const nextContent = content.trim();
+    if (nextContent.length < 4) return;
+
+    onUpdate({
+      type,
+      content: nextContent,
+      importance,
+      sensitivity,
+    });
+    setEditing(false);
+  }
+
   return (
     <div className="animate-rise rounded-2xl border border-line bg-card p-4 shadow-[0_2px_10px_rgba(63,58,38,0.05)]">
-      <p className="text-sm leading-6 text-ink">{memory.content}</p>
-      <MemoryMeta memory={memory} />
-      <MemoryActions onDelete={onDelete} />
+      {editing ? (
+        <div className="space-y-3">
+          <textarea
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            rows={3}
+            className="min-h-24 w-full resize-y rounded-xl border border-line bg-paper px-3 py-2.5 text-sm leading-6 text-ink outline-none transition focus:border-line-strong"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={type}
+              onChange={(event) => setType(event.target.value as MemoryType)}
+              className="h-10 rounded-xl border border-line bg-paper px-3 text-sm text-ink outline-none focus:border-line-strong"
+            >
+              {memoryTypeOrder.map((option) => (
+                <option key={option} value={option}>
+                  {memoryTypeLabels[option]}
+                </option>
+              ))}
+            </select>
+            <select
+              value={sensitivity}
+              onChange={(event) => setSensitivity(event.target.value as MemoryRecord["sensitivity"])}
+              className="h-10 rounded-xl border border-line bg-paper px-3 text-sm text-ink outline-none focus:border-line-strong"
+            >
+              {Object.entries(sensitivityLabels).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-xs text-ink-faint">
+              <span>重要度</span>
+              <span className="font-mono">{importance}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={importance}
+              onChange={(event) => setImportance(Number(event.target.value))}
+              className="mt-2 w-full"
+            />
+          </div>
+          <div className="flex justify-end gap-1">
+            <button
+              type="button"
+              onClick={cancelEdit}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-faint transition hover:bg-mist hover:text-ink"
+              aria-label="取消编辑"
+              title="取消编辑"
+            >
+              <X size={15} />
+            </button>
+            <button
+              type="button"
+              onClick={saveEdit}
+              disabled={content.trim().length < 4}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full text-pine transition hover:bg-moss disabled:cursor-not-allowed disabled:text-ink-faint"
+              aria-label="保存记忆"
+              title="保存记忆"
+            >
+              <Check size={15} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <p className="text-sm leading-6 text-ink">{memory.content}</p>
+          <MemoryMeta memory={memory} />
+          <MemoryActions onEdit={startEdit} onDelete={onDelete} />
+        </>
+      )}
     </div>
   );
 }
@@ -1154,17 +1628,31 @@ function MemoryMeta({ memory }: { memory: MemoryRecord }) {
       <span className="rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
         {memory.importance}
       </span>
+      <span className="rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
+        {formatMemoryDate(memory.createdAt)}
+      </span>
     </div>
   );
 }
 
 function MemoryActions({
+  onEdit,
   onDelete,
 }: {
+  onEdit: () => void;
   onDelete: () => void;
 }) {
   return (
     <div className="mt-3 flex items-center justify-end gap-1">
+      <button
+        type="button"
+        onClick={onEdit}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-faint transition hover:bg-mist hover:text-pine"
+        aria-label="编辑记忆"
+        title="编辑记忆"
+      >
+        <PenLine size={15} />
+      </button>
       <button
         type="button"
         onClick={onDelete}
@@ -1182,11 +1670,16 @@ function MemoryGraph({
   memories,
   selectedMemoryId,
   onSelectMemory,
+  onUpdateMemory,
   onDeleteMemory,
 }: {
   memories: MemoryRecord[];
   selectedMemoryId: string | null;
   onSelectMemory: (memoryId: string | null) => void;
+  onUpdateMemory: (
+    memoryId: string,
+    update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
+  ) => void;
   onDeleteMemory: (memoryId: string) => void;
 }) {
   const selectedMemory =
@@ -1277,13 +1770,11 @@ function MemoryGraph({
         </ReactFlow>
       </div>
       {selectedMemory ? (
-        <div className="rounded-2xl border border-line bg-card p-4">
-          <p className="text-sm leading-6 text-ink">{selectedMemory.content}</p>
-          <MemoryMeta memory={selectedMemory} />
-          <MemoryActions
-            onDelete={() => onDeleteMemory(selectedMemory.id)}
-          />
-        </div>
+        <MemoryCard
+          memory={selectedMemory}
+          onUpdate={(update) => onUpdateMemory(selectedMemory.id, update)}
+          onDelete={() => onDeleteMemory(selectedMemory.id)}
+        />
       ) : (
         <p className="px-1 text-xs text-ink-faint">点一个节点查看或删除。</p>
       )}
@@ -1293,6 +1784,18 @@ function MemoryGraph({
 
 function truncateMemory(content: string) {
   return content.length > 34 ? `${content.slice(0, 34)}...` : content;
+}
+
+function formatMemoryDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知时间";
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function toDisplayMessages(messages: StoredChatMessage[]): Message[] {

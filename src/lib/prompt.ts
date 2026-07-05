@@ -36,8 +36,9 @@ const BASE_SYSTEM_PROMPT = `
 export function buildChatMessages(input: {
   memories: MemoryRecord[];
   threadSummary: string;
-  recentMessages: Array<{ role: "user" | "assistant"; content: string }>;
+  recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
   latestMessage: string;
+  latestMessageCreatedAt?: string;
 }) {
   const memoryBlock = formatMemoryBlock(input.memories);
   const summary = input.threadSummary || "暂无会话摘要。";
@@ -55,10 +56,13 @@ export function buildChatMessages(input: {
         summary,
       ].join("\n"),
     },
-    ...input.recentMessages,
+    ...input.recentMessages.map((message) => ({
+      role: message.role,
+      content: withTimestamp(message.content, message.createdAt),
+    })),
     {
       role: "user" as const,
-      content: input.latestMessage,
+      content: withTimestamp(input.latestMessage, input.latestMessageCreatedAt),
     },
   ];
 }
@@ -70,8 +74,23 @@ function formatMemoryBlock(memories: MemoryRecord[]): string {
     .slice(0, 12)
     .map((memory) => {
       const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
-      return `- [${memory.type}/${confirmed}/importance:${memory.importance}] ${memory.content}`;
+      return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
+        memory.createdAt,
+      )}/lastSeen:${formatContextTime(memory.lastSeenAt)}${memory.validFrom ? `/validFrom:${formatContextTime(memory.validFrom)}` : ""}] ${
+        memory.content
+      }`;
     })
     .join("\n");
+}
+
+function withTimestamp(content: string, createdAt?: string): string {
+  if (!createdAt) return content;
+  return `[时间：${formatContextTime(createdAt)}]\n${content}`;
+}
+
+function formatContextTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toISOString();
 }
 

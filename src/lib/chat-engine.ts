@@ -7,7 +7,7 @@ import type { MemoryCandidate, MemoryRecord } from "./memory/types";
 import { routeModel, type ModelTier, type RoutedModel } from "./model-routing";
 import { buildChatMessages } from "./prompt";
 
-type RecentMessage = { role: "user" | "assistant"; content: string };
+type RecentMessage = { role: "user" | "assistant"; content: string; createdAt?: string };
 
 type ChatEngineInput = {
   userId: string;
@@ -76,6 +76,7 @@ async function composePrompt(state: typeof ChatTurnState.State) {
       threadSummary: "",
       recentMessages: state.recentMessages.slice(-12),
       latestMessage: state.message,
+      latestMessageCreatedAt: new Date().toISOString(),
     }),
   };
 }
@@ -169,6 +170,7 @@ export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedC
     threadSummary: "",
     recentMessages: input.recentMessages.slice(-12),
     latestMessage: input.message,
+    latestMessageCreatedAt: new Date().toISOString(),
   });
 
   return {

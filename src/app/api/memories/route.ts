@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { getMemoryRepository } from "@/lib/memory/repository";
+import { memoryTypeSchema, sensitivitySchema } from "@/lib/memory/types";
 import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
@@ -10,6 +11,14 @@ const memoryPatchSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("confirm"),
     memoryId: z.string(),
+  }),
+  z.object({
+    action: z.literal("update"),
+    memoryId: z.string(),
+    type: memoryTypeSchema,
+    content: z.string().min(4).max(200),
+    importance: z.number().int().min(0).max(100),
+    sensitivity: sensitivitySchema,
   }),
   z.object({
     action: z.literal("delete"),
@@ -46,6 +55,18 @@ export async function PATCH(request: Request) {
     if (body.action === "confirm") {
       return NextResponse.json({
         memories: await repository.confirmMemory(userId, body.memoryId),
+        settings: await repository.getMemorySettings(userId),
+      });
+    }
+
+    if (body.action === "update") {
+      return NextResponse.json({
+        memories: await repository.updateMemory(userId, body.memoryId, {
+          type: body.type,
+          content: body.content,
+          importance: body.importance,
+          sensitivity: body.sensitivity,
+        }),
         settings: await repository.getMemorySettings(userId),
       });
     }

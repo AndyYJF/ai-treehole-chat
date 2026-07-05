@@ -31,6 +31,13 @@ export async function extractMemoryCandidates(input: {
   return extractWithRules(input);
 }
 
+export function extractMemoryCandidatesWithRules(input: {
+  messageId: string;
+  userMessage: string;
+}): MemoryCandidate[] {
+  return extractWithRules(input);
+}
+
 async function extractWithModel(input: {
   userId: string;
   messageId: string;
@@ -65,6 +72,7 @@ async function extractWithModel(input: {
 
   return parsed.data.memories.slice(0, 4).map((candidate) => ({
     ...candidate,
+    validFrom: candidate.validFrom ?? today,
     sourceMessageIds: [input.messageId],
   }));
 }

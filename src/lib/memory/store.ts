@@ -1,4 +1,4 @@
-import type { MemoryCandidate, MemoryRecord } from "./types";
+import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 
 const memoryStore = new Map<string, MemoryRecord[]>();
 const memorySettingsStore = new Map<string, { enabled: boolean }>();
@@ -93,6 +93,27 @@ export function confirmMemory(userId: string, memoryId: string): MemoryRecord[] 
 
   memoryStore.set(userId, updated);
   return updated;
+}
+
+export function updateMemory(userId: string, memoryId: string, update: MemoryUpdate): MemoryRecord[] {
+  const now = new Date().toISOString();
+  const updated = listMemories(userId).map((memory) => {
+    if (memory.id !== memoryId) return memory;
+
+    return {
+      ...memory,
+      type: update.type,
+      content: update.content.trim(),
+      importance: update.importance,
+      sensitivity: update.sensitivity,
+      userConfirmed: true,
+      confidence: Math.max(memory.confidence, 0.9),
+      lastSeenAt: now,
+    };
+  });
+
+  memoryStore.set(userId, mergeMemoryRecords(updated));
+  return listMemories(userId);
 }
 
 export function deleteMemory(userId: string, memoryId: string): MemoryRecord[] {
