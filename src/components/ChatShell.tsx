@@ -11,7 +11,6 @@ import {
 import {
   Activity,
   Brain,
-  Check,
   ChevronDown,
   Download,
   Eye,
@@ -295,19 +294,17 @@ export function ChatShell() {
     setUsage(data.summary);
   }
 
-  async function updateMemory(action: "confirm" | "delete", memoryId: string) {
+  async function deleteMemory(memoryId: string) {
     const response = await fetch("/api/memories", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, memoryId }),
+      body: JSON.stringify({ action: "delete", memoryId }),
     });
 
     if (!response.ok) return;
     const data = (await response.json()) as { memories: MemoryRecord[] };
     setMemories(data.memories);
-    if (action === "delete") {
-      setSelectedMemoryId((current) => (current === memoryId ? null : current));
-    }
+    setSelectedMemoryId((current) => (current === memoryId ? null : current));
   }
 
   async function clearAllMemories() {
@@ -1041,14 +1038,14 @@ export function ChatShell() {
                   memories={memories}
                   selectedMemoryId={selectedMemoryId}
                   onSelectMemory={setSelectedMemoryId}
-                  onUpdateMemory={(action, memoryId) => void updateMemory(action, memoryId)}
+                  onDeleteMemory={(memoryId) => void deleteMemory(memoryId)}
                 />
               ) : (
                 memories.map((memory) => (
                   <MemoryCard
                     key={memory.id}
                     memory={memory}
-                    onUpdate={(action) => void updateMemory(action, memory.id)}
+                    onDelete={() => void deleteMemory(memory.id)}
                   />
                 ))
               )}
@@ -1099,16 +1096,16 @@ function ViewToggle({
 
 function MemoryCard({
   memory,
-  onUpdate,
+  onDelete,
 }: {
   memory: MemoryRecord;
-  onUpdate: (action: "confirm" | "delete") => void;
+  onDelete: () => void;
 }) {
   return (
     <div className="animate-rise rounded-2xl border border-line bg-card p-4 shadow-[0_2px_10px_rgba(63,58,38,0.05)]">
       <p className="text-sm leading-6 text-ink">{memory.content}</p>
       <MemoryMeta memory={memory} />
-      <MemoryActions memory={memory} onUpdate={onUpdate} />
+      <MemoryActions onDelete={onDelete} />
     </div>
   );
 }
@@ -1122,39 +1119,20 @@ function MemoryMeta({ memory }: { memory: MemoryRecord }) {
       <span className="rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
         {memory.importance}
       </span>
-      {memory.userConfirmed ? (
-        <span className="inline-flex items-center gap-1 rounded-full bg-mist px-2 py-0.5 text-[11px] text-ink-faint">
-          <Check size={11} />
-          已确认
-        </span>
-      ) : null}
     </div>
   );
 }
 
 function MemoryActions({
-  memory,
-  onUpdate,
+  onDelete,
 }: {
-  memory: MemoryRecord;
-  onUpdate: (action: "confirm" | "delete") => void;
+  onDelete: () => void;
 }) {
   return (
     <div className="mt-3 flex items-center justify-end gap-1">
-      {!memory.userConfirmed ? (
-        <button
-          type="button"
-          onClick={() => onUpdate("confirm")}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-full text-pine transition hover:bg-moss"
-          aria-label="确认记忆"
-          title="确认记忆"
-        >
-          <Check size={15} />
-        </button>
-      ) : null}
       <button
         type="button"
-        onClick={() => onUpdate("delete")}
+        onClick={onDelete}
         className="inline-flex h-8 w-8 items-center justify-center rounded-full text-clay transition hover:bg-clay-soft"
         aria-label="删除记忆"
         title="删除记忆"
@@ -1169,12 +1147,12 @@ function MemoryGraph({
   memories,
   selectedMemoryId,
   onSelectMemory,
-  onUpdateMemory,
+  onDeleteMemory,
 }: {
   memories: MemoryRecord[];
   selectedMemoryId: string | null;
   onSelectMemory: (memoryId: string | null) => void;
-  onUpdateMemory: (action: "confirm" | "delete", memoryId: string) => void;
+  onDeleteMemory: (memoryId: string) => void;
 }) {
   const selectedMemory =
     memories.find((memory) => memory.id === selectedMemoryId) ?? null;
@@ -1268,8 +1246,7 @@ function MemoryGraph({
           <p className="text-sm leading-6 text-ink">{selectedMemory.content}</p>
           <MemoryMeta memory={selectedMemory} />
           <MemoryActions
-            memory={selectedMemory}
-            onUpdate={(action) => onUpdateMemory(action, selectedMemory.id)}
+            onDelete={() => onDeleteMemory(selectedMemory.id)}
           />
         </div>
       ) : (

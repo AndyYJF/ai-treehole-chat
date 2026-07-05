@@ -83,13 +83,11 @@ async function rerankWithSiliconFlow(query: string, memories: MemoryRecord[], li
 
 function formatMemoryForRerank(memory: MemoryRecord): string {
   const confidence = Math.round(memory.confidence * 100);
-  const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
 
   return [
     `type=${memory.type}`,
     `importance=${memory.importance}`,
     `confidence=${confidence}`,
-    `status=${confirmed}`,
     memory.content,
   ].join("\n");
 }
