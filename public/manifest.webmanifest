@@ -1,0 +1,24 @@
+{
+  "name": "Treehole",
+  "short_name": "Treehole",
+  "description": "A quiet AI chat app with long-term memory.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f0e7",
+  "theme_color": "#2f4b37",
+  "icons": [
+    {
+      "src": "/treehole-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/treehole-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

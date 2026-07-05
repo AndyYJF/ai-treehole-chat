@@ -1,0 +1,136 @@
+import type { MemoryCandidate, MemoryRecord } from "./types";
+
+const memoryStore = new Map<string, MemoryRecord[]>();
+const memorySettingsStore = new Map<string, { enabled: boolean }>();
+
+const seedMemories: MemoryRecord[] = [
+  {
+    id: "seed-preference-1",
+    userId: "local-user",
+    type: "procedural",
+    content: "用户偏好安静、少说教、先回应感受，再给选择。",
+    confidence: 0.82,
+    importance: 86,
+    sensitivity: "normal",
+    sourceMessageIds: [],
+    userConfirmed: false,
+    validFrom: null,
+    validUntil: null,
+    createdAt: "2026-07-04T00:00:00.000Z",
+    lastSeenAt: "2026-07-04T00:00:00.000Z",
+  },
+  {
+    id: "seed-boundary-1",
+    userId: "local-user",
+    type: "boundary",
+    content: "不要把普通倾诉立刻上升成诊断或命令式建议。",
+    confidence: 0.8,
+    importance: 78,
+    sensitivity: "normal",
+    sourceMessageIds: [],
+    userConfirmed: false,
+    validFrom: null,
+    validUntil: null,
+    createdAt: "2026-07-04T00:00:00.000Z",
+    lastSeenAt: "2026-07-04T00:00:00.000Z",
+  },
+];
+
+export function listMemories(userId: string): MemoryRecord[] {
+  if (!memoryStore.has(userId)) {
+    memoryStore.set(
+      userId,
+      seedMemories.map((memory) => ({ ...memory, userId })),
+    );
+  }
+
+  return [...(memoryStore.get(userId) ?? [])].sort(sortMemoryForPrompt);
+}
+
+export function getMemorySettings(userId: string) {
+  const current = memorySettingsStore.get(userId) ?? { enabled: true };
+  memorySettingsStore.set(userId, current);
+  return current;
+}
+
+export function setMemoryEnabled(userId: string, enabled: boolean) {
+  const next = { enabled };
+  memorySettingsStore.set(userId, next);
+  return next;
+}
+
+export function addMemoryCandidates(userId: string, candidates: MemoryCandidate[]): MemoryRecord[] {
+  const existing = listMemories(userId);
+  const now = new Date().toISOString();
+  const created = candidates.map((candidate, index): MemoryRecord => {
+    return {
+      ...candidate,
+      id: `mem-${Date.now()}-${index}`,
+      userId,
+      userConfirmed: false,
+      createdAt: now,
+      lastSeenAt: now,
+    };
+  });
+
+  const merged = mergeMemoryRecords([...existing, ...created]);
+  memoryStore.set(userId, merged);
+  return merged;
+}
+
+export function confirmMemory(userId: string, memoryId: string): MemoryRecord[] {
+  const now = new Date().toISOString();
+  const updated = listMemories(userId).map((memory) => {
+    if (memory.id !== memoryId) return memory;
+
+    return {
+      ...memory,
+      userConfirmed: true,
+      confidence: Math.max(memory.confidence, 0.9),
+      lastSeenAt: now,
+    };
+  });
+
+  memoryStore.set(userId, updated);
+  return updated;
+}
+
+export function deleteMemory(userId: string, memoryId: string): MemoryRecord[] {
+  const updated = listMemories(userId).filter((memory) => memory.id !== memoryId);
+  memoryStore.set(userId, updated);
+  return updated;
+}
+
+export function clearMemories(userId: string): MemoryRecord[] {
+  memoryStore.set(userId, []);
+  return [];
+}
+
+function mergeMemoryRecords(records: MemoryRecord[]): MemoryRecord[] {
+  const byContent = new Map<string, MemoryRecord>();
+
+  for (const record of records) {
+    const key = `${record.type}:${record.content.trim()}`;
+    const previous = byContent.get(key);
+
+    if (!previous || record.confidence > previous.confidence || record.lastSeenAt > previous.lastSeenAt) {
+      byContent.set(key, {
+        ...record,
+        confidence: Math.max(record.confidence, previous?.confidence ?? 0),
+        sourceMessageIds: Array.from(new Set([...(previous?.sourceMessageIds ?? []), ...record.sourceMessageIds])),
+      });
+    }
+  }
+
+  return Array.from(byContent.values()).sort(sortMemoryForPrompt).slice(0, 80);
+}
+
+export function sortMemoryForPrompt(a: MemoryRecord, b: MemoryRecord): number {
+  const typeOrder = ["safety", "boundary", "procedural", "preference", "semantic", "affect", "episodic"];
+  const typeDelta = typeOrder.indexOf(a.type) - typeOrder.indexOf(b.type);
+
+  if (typeDelta !== 0) return typeDelta;
+  if (b.importance !== a.importance) return b.importance - a.importance;
+  if (b.lastSeenAt !== a.lastSeenAt) return b.lastSeenAt.localeCompare(a.lastSeenAt);
+  return a.id.localeCompare(b.id);
+}

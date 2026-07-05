@@ -1,0 +1,163 @@
+@import "tailwindcss";
+
+@theme {
+  /* 暖纸与松林 —— 树洞的基础色板 */
+  --color-paper: #f3f0e7;
+  --color-card: #fcfbf6;
+  --color-mist: #eae7da;
+  --color-moss: #e3e9d7;
+  --color-line: #dfddcc;
+  --color-line-strong: #c8c9b5;
+  --color-ink: #272e25;
+  --color-ink-soft: #5a634f;
+  --color-ink-faint: #8f967f;
+  --color-pine: #2f4b37;
+  --color-pine-deep: #22392a;
+  --color-clay: #a04e33;
+  --color-clay-soft: #f2e3d9;
+
+  --font-display: Georgia, "Songti SC", "STSong", "SimSun", serif;
+
+  --animate-rise: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-veil: veil 0.25s ease-out both;
+  --animate-panel: panel 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-breathe: breathe 1.5s ease-in-out infinite;
+  --animate-shake: shake 0.45s ease-in-out both;
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+    "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes veil {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes panel {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-6px);
+  }
+  50% {
+    transform: translateX(5px);
+  }
+  75% {
+    transform: translateX(-3px);
+  }
+}
+
+body {
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(60rem 42rem at 88% -12%, rgba(107, 141, 102, 0.14), transparent 62%),
+    radial-gradient(46rem 36rem at -12% 108%, rgba(178, 148, 96, 0.11), transparent 58%),
+    var(--color-paper);
+  background-attachment: fixed;
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+}
+
+::selection {
+  background: var(--color-moss);
+  color: var(--color-pine-deep);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+}
+
+input[type="range"] {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-line-strong);
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  height: 18px;
+  width: 18px;
+  border-radius: 999px;
+  background: var(--color-pine);
+  border: 3px solid var(--color-card);
+  box-shadow: 0 1px 5px rgba(34, 57, 42, 0.35);
+}
+
+input[type="range"]::-moz-range-thumb {
+  height: 12px;
+  width: 12px;
+  border-radius: 999px;
+  background: var(--color-pine);
+  border: 3px solid var(--color-card);
+  box-shadow: 0 1px 5px rgba(34, 57, 42, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

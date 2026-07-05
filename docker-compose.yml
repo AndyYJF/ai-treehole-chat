@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: ai-treehole-chat-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: treehole
+      POSTGRES_USER: treehole
+      POSTGRES_PASSWORD: treehole-local-change-me
+    volumes:
+      - treehole-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U treehole -d treehole"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+    container_name: ai-treehole-chat
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: postgresql://treehole:treehole-local-change-me@db:5432/treehole
+    ports:
+      - "3010:3000"
+
+volumes:
+  treehole-postgres:
