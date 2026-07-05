@@ -119,7 +119,7 @@ function createChatStream(
           routed: prepared.routed,
         });
 
-        for await (const delta of streamDeepSeek({
+        for await (const chunk of streamDeepSeek({
           userId: input.userId,
           operation: "chat",
           model: prepared.routed.model,
@@ -127,10 +127,17 @@ function createChatStream(
           temperature: input.temperature,
           signal,
         })) {
-          reply += delta;
+          if (chunk.type === "reasoning") {
+            send({
+              type: "reasoning",
+            });
+            continue;
+          }
+
+          reply += chunk.delta;
           send({
             type: "token",
-            delta,
+            delta: chunk.delta,
           });
         }
 

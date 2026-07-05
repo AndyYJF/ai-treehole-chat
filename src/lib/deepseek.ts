@@ -8,6 +8,10 @@ export type ChatMessage = {
 
 type DeepSeekOperation = "chat" | "memory_extract" | "title_summarize";
 
+export type DeepSeekStreamChunk =
+  | { type: "content"; delta: string }
+  | { type: "reasoning" };
+
 export async function callDeepSeek(input: {
   userId?: string;
   operation?: DeepSeekOperation;
@@ -36,13 +40,14 @@ export async function callDeepSeek(input: {
     return reply;
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: input.model,
     messages: input.messages,
     temperature: input.temperature ?? 0.72,
     stream: false,
     user_id: input.userId,
   };
+  enableThinkingForChat(body, input.operation);
 
   const response = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -94,7 +99,7 @@ export async function* streamDeepSeek(input: {
   messages: ChatMessage[];
   temperature?: number;
   signal?: AbortSignal;
-}): AsyncGenerator<string> {
+}): AsyncGenerator<DeepSeekStreamChunk> {
   const config = await getRuntimeConfig();
   const apiKey = config.deepseekApiKey;
   const baseUrl = config.deepseekBaseUrl;
@@ -106,7 +111,7 @@ export async function* streamDeepSeek(input: {
 
     for (const chunk of chunkText(reply)) {
       await new Promise((resolve) => setTimeout(resolve, 18));
-      yield chunk;
+      yield { type: "content", delta: chunk };
     }
 
     await recordUsageSafely({
@@ -121,7 +126,7 @@ export async function* streamDeepSeek(input: {
     return;
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: input.model,
     messages: input.messages,
     temperature: input.temperature ?? 0.72,
@@ -131,6 +136,7 @@ export async function* streamDeepSeek(input: {
     },
     user_id: input.userId,
   };
+  enableThinkingForChat(body, input.operation);
 
   const response = await fetchWithRetry(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -179,7 +185,8 @@ export async function* streamDeepSeek(input: {
 
         const chunk = parseStreamChunk(data);
         if (chunk.usage) usage = chunk.usage;
-        if (chunk.delta) yield chunk.delta;
+        if (chunk.reasoning) yield { type: "reasoning" };
+        if (chunk.delta) yield { type: "content", delta: chunk.delta };
       }
     }
   }
@@ -194,7 +201,8 @@ export async function* streamDeepSeek(input: {
 
       const chunk = parseStreamChunk(data);
       if (chunk.usage) usage = chunk.usage;
-      if (chunk.delta) yield chunk.delta;
+      if (chunk.reasoning) yield { type: "reasoning" };
+      if (chunk.delta) yield { type: "content", delta: chunk.delta };
     }
   }
 
@@ -275,20 +283,30 @@ export async function callDeepSeekJson(input: {
   return parseLooseJson(content);
 }
 
-function parseStreamChunk(data: string): { delta: string; usage?: ModelUsage } {
+function parseStreamChunk(data: string): { delta: string; reasoning: boolean; usage?: ModelUsage } {
   try {
     const parsed = JSON.parse(data) as {
-      choices?: Array<{ delta?: { content?: string } }>;
+      choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>;
       usage?: unknown;
     };
+    const delta = parsed.choices?.[0]?.delta;
 
     return {
-      delta: parsed.choices?.[0]?.delta?.content ?? "",
+      delta: delta?.content ?? "",
+      reasoning: Boolean(delta?.reasoning_content),
       usage: parsed.usage ? normalizeUsage(parsed.usage) : undefined,
     };
   } catch {
-    return { delta: "" };
+    return { delta: "", reasoning: false };
   }
+}
+
+function enableThinkingForChat(body: Record<string, unknown>, operation: DeepSeekOperation | undefined) {
+  if (operation !== "chat") return;
+
+  body.thinking = {
+    type: "enabled",
+  };
 }
 
 async function fetchWithRetry(url: string, init: RequestInit, maxAttempts = 3): Promise<Response> {

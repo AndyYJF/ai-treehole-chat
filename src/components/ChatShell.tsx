@@ -64,6 +64,7 @@ type ChatThread = {
 
 type ChatStreamEvent =
   | { type: "route"; routed: { label: string } }
+  | { type: "reasoning" }
   | { type: "token"; delta: string }
   | {
       type: "done";
@@ -149,6 +150,7 @@ export function ChatShell() {
   const [input, setInput] = useState("");
   const [tier, setTier] = useState<ModelTier>("auto");
   const [isThinking, setIsThinking] = useState(false);
+  const [thinkingSeconds, setThinkingSeconds] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -168,6 +170,7 @@ export function ChatShell() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
+  const thinkingTimerRef = useRef<number | null>(null);
   const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
@@ -223,6 +226,7 @@ export function ChatShell() {
       if (noticeTimerRef.current != null) {
         window.clearTimeout(noticeTimerRef.current);
       }
+      stopThinkingTimer();
     };
   }, []);
 
@@ -255,6 +259,23 @@ export function ChatShell() {
       setNotice("");
       noticeTimerRef.current = null;
     }, 2200);
+  }
+
+  function startThinkingTimer() {
+    stopThinkingTimer();
+    const startedAt = Date.now();
+    setThinkingSeconds(0);
+
+    thinkingTimerRef.current = window.setInterval(() => {
+      setThinkingSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+  }
+
+  function stopThinkingTimer() {
+    if (thinkingTimerRef.current == null) return;
+
+    window.clearInterval(thinkingTimerRef.current);
+    thinkingTimerRef.current = null;
   }
 
   async function refreshMemories() {
@@ -540,6 +561,7 @@ export function ChatShell() {
     ]);
     setInput("");
     setIsThinking(true);
+    startThinkingTimer();
     requestAnimationFrame(resizeTextarea);
 
     try {
@@ -561,6 +583,7 @@ export function ChatShell() {
 
       await readChatStream(response, {
         onRoute: (label) => setRouteLabel(label),
+        onReasoning: () => setIsThinking(true),
         onToken: (delta) => {
           setMessages((current) =>
             current.map((message) =>
@@ -578,7 +601,16 @@ export function ChatShell() {
           setActiveThread(data.activeThread);
           setThreads(data.threads);
           setMemories(data.memories);
-          setMessages(toDisplayMessages(data.messages));
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessage.id && message.content.trim().length === 0
+                ? {
+                    ...message,
+                    content: latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
+                  }
+                : message,
+            ),
+          );
           void refreshUsage();
         },
       });
@@ -592,6 +624,7 @@ export function ChatShell() {
         },
       ]);
     } finally {
+      stopThinkingTimer();
       setIsThinking(false);
     }
   }
@@ -702,7 +735,9 @@ export function ChatShell() {
                       <span className="animate-breathe h-1.5 w-1.5 rounded-full bg-pine [animation-delay:0.2s]" />
                       <span className="animate-breathe h-1.5 w-1.5 rounded-full bg-pine [animation-delay:0.4s]" />
                     </span>
-                    <span className="text-sm text-ink-faint">在听</span>
+                    <span className="text-sm text-ink-faint">
+                      思考中（{thinkingSeconds}秒）
+                    </span>
                   </div>
                 </div>
               ) : null}
@@ -1270,10 +1305,20 @@ function toDisplayMessages(messages: StoredChatMessage[]): Message[] {
   }));
 }
 
+function latestAssistantContent(messages: StoredChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant" && message.content.trim()) return message.content;
+  }
+
+  return null;
+}
+
 async function readChatStream(
   response: Response,
   handlers: {
     onRoute: (label: string) => void;
+    onReasoning: () => void;
     onToken: (delta: string) => void;
     onDone: (data: Extract<ChatStreamEvent, { type: "done" }>) => void;
   },
@@ -1320,6 +1365,7 @@ function handleChatStreamLine(
   line: string,
   handlers: {
     onRoute: (label: string) => void;
+    onReasoning: () => void;
     onToken: (delta: string) => void;
     onDone: (data: Extract<ChatStreamEvent, { type: "done" }>) => void;
   },
@@ -1335,6 +1381,11 @@ function handleChatStreamLine(
 
   if (event.type === "token") {
     handlers.onToken(event.delta);
+    return;
+  }
+
+  if (event.type === "reasoning") {
+    handlers.onReasoning();
     return;
   }
 
