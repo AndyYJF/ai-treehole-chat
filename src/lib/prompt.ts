@@ -34,14 +34,15 @@ const BASE_SYSTEM_PROMPT = `
 
 export function buildChatMessages(input: {
   memories: MemoryRecord[];
+  relevantMemories?: MemoryRecord[];
   realityContext: string;
   threadSummary: string;
   recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
   latestMessage: string;
   latestMessageCreatedAt?: string;
 }) {
-  const now = new Date();
   const memoryBlock = formatMemoryBlock(input.memories);
+  const latestMessageCreatedAt = input.latestMessageCreatedAt ?? new Date().toISOString();
   const summary = input.threadSummary || "暂无会话摘要。";
 
   return [
@@ -53,20 +54,25 @@ export function buildChatMessages(input: {
         "【长期记忆】",
         memoryBlock,
         "",
-        "【现实上下文】",
-        input.realityContext,
-        "",
         "【当前会话摘要】",
         summary,
       ].join("\n"),
     },
     ...input.recentMessages.map((message) => ({
       role: message.role,
-      content: withTimestamp(message.content, message.createdAt, now),
+      content: withTimestamp(message.content, message.createdAt),
     })),
     {
       role: "user" as const,
-      content: withTimestamp(input.latestMessage, input.latestMessageCreatedAt, now),
+      content: [
+        "【现实上下文】",
+        input.realityContext,
+        "",
+        "【本轮相关记忆】",
+        formatRelevantMemoryBlock(input.relevantMemories ?? []),
+        "",
+        withTimestamp(input.latestMessage, latestMessageCreatedAt),
+      ].join("\n"),
     },
   ];
 }
@@ -74,29 +80,41 @@ export function buildChatMessages(input: {
 function formatMemoryBlock(memories: MemoryRecord[]): string {
   if (memories.length === 0) return "暂无长期记忆。";
 
-  const now = new Date();
   return memories
     .slice(0, 12)
     .map((memory) => {
       const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
       return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
         memory.createdAt,
-        now,
-      )}/lastSeen:${formatContextTime(memory.lastSeenAt, now)}/validFrom:${formatContextTime(
-        memory.validFrom,
-        now,
       )}] ${memory.content}`;
     })
     .join("\n");
 }
 
-function withTimestamp(content: string, createdAt: string | undefined, fallback: Date): string {
-  return `[时间：${formatContextTime(createdAt, fallback)}]\n${content}`;
+function formatRelevantMemoryBlock(memories: MemoryRecord[]): string {
+  if (memories.length === 0) return "暂无本轮相关记忆。";
+
+  return memories
+    .slice(0, 8)
+    .map((memory) => {
+      const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
+      return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
+        memory.createdAt,
+      )}] ${memory.content}`;
+    })
+    .join("\n");
 }
 
-function formatContextTime(value: string | null | undefined, fallback: Date): string {
-  const date = value ? new Date(value) : fallback;
-  if (Number.isNaN(date.getTime())) return value ?? toUtc8IsoString(fallback);
+function withTimestamp(content: string, createdAt: string | undefined): string {
+  const timestamp = createdAt ? formatContextTime(createdAt) : "unknown";
+  return `[时间：${timestamp}]\n${content}`;
+}
+
+function formatContextTime(value: string | null | undefined): string {
+  if (!value) return "unknown";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
   return toUtc8IsoString(date);
 }
 
