@@ -144,6 +144,8 @@ type LocalState = {
 };
 
 const storageKey = "treehole-chat-state-v1";
+const proactiveGreetingStoragePrefix = "treehole-proactive-greeting-v1";
+const proactiveGreetingThresholdMs = 8 * 60 * 60 * 1000;
 
 function createClientId() {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -232,6 +234,8 @@ export function ChatShell() {
   const noticeTimerRef = useRef<number | null>(null);
   const thinkingTimerRef = useRef<number | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const greetingAttemptedRef = useRef(false);
+  const greetingInFlightRef = useRef(false);
   const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
@@ -277,6 +281,16 @@ export function ChatShell() {
 
     window.localStorage.setItem(storageKey, JSON.stringify(state));
   }, [activeThread?.id, loaded, memoryEnabled, routeLabel, temperature, tier]);
+
+  useEffect(() => {
+    if (!loaded || !activeThread?.id || isThinking || greetingAttemptedRef.current) return;
+
+    greetingAttemptedRef.current = true;
+
+    if (!shouldTriggerProactiveGreeting(activeThread)) return;
+
+    void triggerProactiveGreeting(activeThread.id);
+  }, [activeThread, isThinking, loaded]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -787,6 +801,106 @@ export function ChatShell() {
     setRouteLabel("自动");
     setInput("");
     showNotice("已清空当前上下文。");
+  }
+
+  function shouldTriggerProactiveGreeting(thread: ChatThread) {
+    const lockKey = proactiveGreetingLockKey(thread.id);
+    const lockedAt = Number(window.localStorage.getItem(lockKey) ?? 0);
+
+    if (lockedAt && Date.now() - lockedAt < proactiveGreetingThresholdMs) return false;
+    if (!thread.lastMessageAt) return true;
+
+    const lastMessageAt = new Date(thread.lastMessageAt).getTime();
+    if (Number.isNaN(lastMessageAt)) return false;
+
+    return Date.now() - lastMessageAt >= proactiveGreetingThresholdMs;
+  }
+
+  async function triggerProactiveGreeting(threadId: string) {
+    if (greetingInFlightRef.current) return;
+
+    const assistantMessage: Message = {
+      id: createClientId(),
+      role: "assistant",
+      content: "",
+    };
+    const lockKey = proactiveGreetingLockKey(threadId);
+
+    greetingInFlightRef.current = true;
+    window.localStorage.setItem(lockKey, String(Date.now()));
+    setMessages((current) => [...current.filter((message) => message.id !== "hello"), assistantMessage]);
+    setIsThinking(true);
+    setChatStatus("准备关心");
+    startThinkingTimer();
+
+    try {
+      const response = await fetch("/api/chat/greet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId }),
+      });
+
+      if (response.status === 204) {
+        setMessages((current) => {
+          const next = current.filter((message) => message.id !== assistantMessage.id);
+          return next.length > 0 ? next : initialMessages;
+        });
+        return;
+      }
+
+      if (!response.ok) throw new Error("request failed");
+
+      await readChatStream(response, {
+        onRoute: (label) => setRouteLabel(label),
+        onStatus: (label) => setChatStatus(label),
+        onReasoning: () => setIsThinking(true),
+        onToken: (delta) => {
+          setChatStatus("");
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessage.id
+                ? {
+                    ...message,
+                    content: message.content + delta,
+                  }
+                : message,
+            ),
+          );
+        },
+        onDone: (data) => {
+          setRouteLabel(data.routed.label);
+          setActiveThread(data.activeThread);
+          setThreads(data.threads);
+          setMemories(data.memories);
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessage.id
+                ? {
+                    ...message,
+                    content:
+                      message.content.trim().length > 0
+                        ? message.content
+                        : latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
+                    usedMemories: data.usedMemories ?? [],
+                  }
+                : message,
+            ),
+          );
+          void refreshUsage();
+        },
+      });
+    } catch {
+      window.localStorage.removeItem(lockKey);
+      setMessages((current) => {
+        const next = current.filter((message) => message.id !== assistantMessage.id);
+        return next.length > 0 ? next : initialMessages;
+      });
+    } finally {
+      greetingInFlightRef.current = false;
+      stopThinkingTimer();
+      setIsThinking(false);
+      setChatStatus("");
+    }
   }
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
@@ -2391,6 +2505,10 @@ function latestAssistantContent(messages: StoredChatMessage[]): string | null {
   }
 
   return null;
+}
+
+function proactiveGreetingLockKey(threadId: string) {
+  return `${proactiveGreetingStoragePrefix}:${threadId}`;
 }
 
 async function readChatStream(
