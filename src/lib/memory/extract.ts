@@ -70,7 +70,7 @@ async function extractWithModel(input: {
   const parsed = memoryCandidateJsonSchema.safeParse(json);
   if (!parsed.success) return [];
 
-  return parsed.data.memories.slice(0, 4).map((candidate) => ({
+  return parsed.data.memories.slice(0, 10).map((candidate) => ({
     ...candidate,
     validFrom: candidate.validFrom ?? today,
     sourceMessageIds: [input.messageId],

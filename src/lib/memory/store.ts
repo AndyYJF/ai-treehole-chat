@@ -1,5 +1,5 @@
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
-import { findMergeTarget, mergeMemoryRecord } from "./merge";
+import { maintainMemoryRecords } from "./merge";
 
 const memoryStore = new Map<string, MemoryRecord[]>();
 const memorySettingsStore = new Map<string, { enabled: boolean }>();
@@ -118,7 +118,7 @@ export function updateMemory(userId: string, memoryId: string, update: MemoryUpd
 }
 
 export function maintainMemories(userId: string): MemoryRecord[] {
-  const maintained = mergeMemoryRecords(listMemories(userId)).slice(0, 80);
+  const maintained = maintainMemoryRecords(listMemories(userId));
   memoryStore.set(userId, maintained);
   return listMemories(userId);
 }
@@ -135,24 +135,7 @@ export function clearMemories(userId: string): MemoryRecord[] {
 }
 
 export function mergeMemoryRecords(records: MemoryRecord[]): MemoryRecord[] {
-  const byContent = new Map<string, MemoryRecord>();
-
-  for (const record of records) {
-    const current = [...byContent.values()];
-    const target = findMergeTarget(current, record);
-
-    if (target) {
-      byContent.set(target.id, mergeMemoryRecord(target, record));
-      continue;
-    }
-
-    byContent.set(record.id, {
-      ...record,
-      content: record.content.trim(),
-    });
-  }
-
-  return Array.from(byContent.values()).sort(sortMemoryForPrompt).slice(0, 80);
+  return maintainMemoryRecords(records);
 }
 
 export function sortMemoryForPrompt(a: MemoryRecord, b: MemoryRecord): number {

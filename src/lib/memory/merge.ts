@@ -1,6 +1,28 @@
 import type { MemoryRecord } from "./types";
 
 const similarityThreshold = 0.72;
+const strictSimilarityThreshold = 0.86;
+const negationPenalty = 0.2;
+const decayRatePerDay = 0.9;
+const decayableTypes = new Set<MemoryRecord["type"]>(["affect", "episodic", "semantic"]);
+const strictMergeTypes = new Set<MemoryRecord["type"]>(["preference", "boundary"]);
+const negationPatterns = [
+  "不喜欢",
+  "不想",
+  "不愿",
+  "不要",
+  "不能",
+  "不会",
+  "不是",
+  "并不",
+  "没有",
+  "没",
+  "别",
+  "讨厌",
+  "拒绝",
+  "避免",
+  "不",
+] as const;
 
 export function findMergeTarget<T extends Pick<MemoryRecord, "id" | "type" | "content">>(
   memories: T[],
@@ -15,8 +37,8 @@ export function findMergeTarget<T extends Pick<MemoryRecord, "id" | "type" | "co
   for (const memory of memories) {
     if (memory.id === excludeId || memory.type !== incoming.type) continue;
 
-    const score = memorySimilarity(memory.content, incomingContent);
-    if (score >= similarityThreshold && (!best || score > best.score)) {
+    const score = memorySimilarity(memory.content, incomingContent, incoming.type);
+    if (score >= mergeThresholdForType(incoming.type) && (!best || score > best.score)) {
       best = { memory, score };
     }
   }
@@ -24,19 +46,27 @@ export function findMergeTarget<T extends Pick<MemoryRecord, "id" | "type" | "co
   return best?.memory ?? null;
 }
 
-export function mergeMemoryRecord(base: MemoryRecord, incoming: MemoryRecord): MemoryRecord {
+export function mergeMemoryRecord(
+  base: MemoryRecord,
+  incoming: MemoryRecord,
+  options: { applyDecay?: boolean } = {},
+): MemoryRecord {
+  const shouldApplyDecay = options.applyDecay ?? true;
+  const decayedBase = shouldApplyDecay ? applyMemoryDecay(base) : base;
+  const decayedIncoming = shouldApplyDecay ? applyMemoryDecay(incoming) : incoming;
+
   return {
-    ...base,
-    content: chooseContent(base, incoming),
-    confidence: Math.max(base.confidence, incoming.confidence),
-    importance: Math.max(base.importance, incoming.importance),
-    sensitivity: stricterSensitivity(base.sensitivity, incoming.sensitivity),
-    sourceMessageIds: Array.from(new Set([...base.sourceMessageIds, ...incoming.sourceMessageIds])),
-    userConfirmed: base.userConfirmed || incoming.userConfirmed,
-    validFrom: earlierTime(base.validFrom, incoming.validFrom),
-    validUntil: incoming.validUntil ?? base.validUntil,
-    createdAt: earlierTime(base.createdAt, incoming.createdAt) ?? base.createdAt,
-    lastSeenAt: laterTime(base.lastSeenAt, incoming.lastSeenAt) ?? incoming.lastSeenAt,
+    ...decayedBase,
+    content: chooseContent(decayedBase, decayedIncoming),
+    confidence: Math.max(decayedBase.confidence, decayedIncoming.confidence),
+    importance: Math.max(decayedBase.importance, decayedIncoming.importance),
+    sensitivity: stricterSensitivity(decayedBase.sensitivity, decayedIncoming.sensitivity),
+    sourceMessageIds: Array.from(new Set([...decayedBase.sourceMessageIds, ...decayedIncoming.sourceMessageIds])),
+    userConfirmed: decayedBase.userConfirmed || decayedIncoming.userConfirmed,
+    validFrom: earlierTime(decayedBase.validFrom, decayedIncoming.validFrom),
+    validUntil: decayedIncoming.validUntil ?? decayedBase.validUntil,
+    createdAt: earlierTime(decayedBase.createdAt, decayedIncoming.createdAt) ?? decayedBase.createdAt,
+    lastSeenAt: laterTime(decayedBase.lastSeenAt, decayedIncoming.lastSeenAt) ?? decayedIncoming.lastSeenAt,
   };
 }
 
@@ -44,30 +74,39 @@ export function maintainMemoryRecords(memories: MemoryRecord[], limit = 80): Mem
   const maintained: MemoryRecord[] = [];
 
   for (const memory of memories) {
-    const target = findMergeTarget(maintained, memory);
+    const decayed = applyMemoryDecay(memory);
+    const target = findMergeTarget(maintained, decayed);
 
     if (target) {
       const index = maintained.findIndex((item) => item.id === target.id);
-      maintained[index] = mergeMemoryRecord(target, memory);
+      maintained[index] = mergeMemoryRecord(target, decayed, { applyDecay: false });
       continue;
     }
 
     maintained.push({
-      ...memory,
-      content: memory.content.trim(),
+      ...decayed,
+      content: decayed.content.trim(),
     });
   }
 
   return maintained.sort(sortMemoryForMaintenance).slice(0, limit);
 }
 
-export function memorySimilarity(a: string, b: string): number {
+export function memorySimilarity(a: string, b: string, type?: MemoryRecord["type"]): number {
   const left = normalizeMemoryText(a);
   const right = normalizeMemoryText(b);
   if (!left || !right) return 0;
   if (left === right) return 1;
+  const leftNegations = negationSignature(a);
+  const rightNegations = negationSignature(b);
+
   if (left.length >= 10 && right.length >= 10 && (left.includes(right) || right.includes(left))) {
-    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+    return applySimilarityGuards(
+      Math.min(left.length, right.length) / Math.max(left.length, right.length),
+      leftNegations,
+      rightNegations,
+      type,
+    );
   }
 
   const leftTokens = tokenizeMemory(left);
@@ -80,7 +119,19 @@ export function memorySimilarity(a: string, b: string): number {
   }
 
   const union = new Set([...leftTokens, ...rightTokens]).size;
-  return intersection / union;
+  return applySimilarityGuards(intersection / union, leftNegations, rightNegations, type);
+}
+
+export function applyMemoryDecay(memory: MemoryRecord, now = new Date()): MemoryRecord {
+  if (!decayableTypes.has(memory.type)) return memory;
+
+  const ageInDays = memoryAgeInDays(memory, now);
+  if (ageInDays <= 0) return memory;
+
+  return {
+    ...memory,
+    importance: clampImportance(Math.round(memory.importance * decayRatePerDay ** ageInDays)),
+  };
 }
 
 function normalizeMemoryText(text: string): string {
@@ -104,6 +155,68 @@ function tokenizeMemory(text: string): Set<string> {
   }
 
   return tokens;
+}
+
+function applySimilarityGuards(
+  score: number,
+  leftNegations: Set<string>,
+  rightNegations: Set<string>,
+  type?: MemoryRecord["type"],
+): number {
+  let guardedScore = score;
+
+  if (!sameNegationSignature(leftNegations, rightNegations)) {
+    guardedScore *= negationPenalty;
+  }
+
+  if (type && strictMergeTypes.has(type)) {
+    guardedScore = Math.min(guardedScore, guardedScore ** 1.15);
+  }
+
+  return guardedScore;
+}
+
+function mergeThresholdForType(type: MemoryRecord["type"]) {
+  return strictMergeTypes.has(type) ? strictSimilarityThreshold : similarityThreshold;
+}
+
+function negationSignature(text: string): Set<string> {
+  const normalized = normalizeMemoryText(text);
+  const signature = new Set<string>();
+
+  for (const pattern of negationPatterns) {
+    if (normalized.includes(pattern)) signature.add(pattern);
+  }
+
+  return signature;
+}
+
+function sameNegationSignature(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false;
+
+  for (const negation of left) {
+    if (!right.has(negation)) return false;
+  }
+
+  return true;
+}
+
+function memoryAgeInDays(memory: Pick<MemoryRecord, "validFrom" | "createdAt">, now: Date) {
+  const timestamp = parseMemoryTimestamp(memory.validFrom) ?? parseMemoryTimestamp(memory.createdAt);
+  if (timestamp == null) return 0;
+
+  return Math.max(0, (now.getTime() - timestamp) / (24 * 60 * 60 * 1000));
+}
+
+function parseMemoryTimestamp(value: string | null) {
+  if (!value) return null;
+
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function clampImportance(value: number) {
+  return Math.max(0, Math.min(100, value));
 }
 
 function chooseContent(base: MemoryRecord, incoming: MemoryRecord): string {
