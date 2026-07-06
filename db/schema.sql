@@ -55,6 +55,17 @@ create table if not exists chat_messages (
 create index if not exists chat_messages_user_thread_created_idx
   on chat_messages (user_id, thread_id, created_at asc);
 
+create table if not exists timebox_letters (
+  id text primary key,
+  user_id text not null,
+  content text not null,
+  is_read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists timebox_letters_user_created_idx
+  on timebox_letters (user_id, created_at desc);
+
 create table if not exists model_usage_events (
   id text primary key,
   user_id text not null,

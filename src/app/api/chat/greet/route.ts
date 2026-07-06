@@ -4,6 +4,7 @@ import {
   appendChatMessages,
   ensureActiveChatThread,
   listChatMessages,
+  listRecentChatMessages,
   listChatThreads,
 } from "@/lib/chat-history";
 import { streamDeepSeek } from "@/lib/deepseek";
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
     const body = greetingRequestSchema.parse(await request.json().catch(() => ({})));
     const userId = getServerUserId();
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
-    const lockKey = `${userId}:${activeThread.id}`;
+    const lockKey = userId;
     const now = Date.now();
     const existingLock = greetingLocks.get(lockKey);
 
@@ -40,10 +41,17 @@ export async function POST(request: Request) {
     }
 
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
-    const lastMessage = serverMessages.at(-1);
-    const lastMessageAt = lastMessage ? new Date(lastMessage.createdAt).getTime() : null;
+    const globalRecentMessages = await listRecentChatMessages(userId, 24);
+    const lastMessage = globalRecentMessages.at(-1);
+    const lastUserMessage = [...globalRecentMessages].reverse().find((message) => message.role === "user") ?? null;
+    const lastMessageAt = parseTime(lastMessage?.createdAt);
+    const lastUserMessageAt = parseTime(lastUserMessage?.createdAt);
 
     if (lastMessageAt && now - lastMessageAt < greetingThresholdMs) {
+      return new Response(null, { status: 204 });
+    }
+
+    if (lastUserMessageAt && now - lastUserMessageAt < greetingThresholdMs) {
       return new Response(null, { status: 204 });
     }
 
@@ -184,6 +192,13 @@ function selectGreetingMemories(memories: MemoryRecord[]) {
       return new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime();
     })
     .slice(0, 6);
+}
+
+function parseTime(value: string | null | undefined) {
+  if (!value) return null;
+
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
 }
 
 function buildGreetingSystemPrompt(input: {

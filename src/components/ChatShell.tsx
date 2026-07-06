@@ -135,6 +135,14 @@ type UsagePayload = {
   recent: UsageRecord[];
 };
 
+type TimeboxLetter = {
+  id: string;
+  userId: string;
+  content: string;
+  isRead: boolean;
+  createdAt: string;
+};
+
 type LocalState = {
   tier: ModelTier;
   routeLabel: string;
@@ -228,6 +236,9 @@ export function ChatShell() {
   const [notice, setNotice] = useState("");
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeThread, setActiveThread] = useState<ChatThread | null>(null);
+  const [letters, setLetters] = useState<TimeboxLetter[]>([]);
+  const [isLetterDrawerOpen, setIsLetterDrawerOpen] = useState(false);
+  const [selectedLetterId, setSelectedLetterId] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -266,6 +277,25 @@ export function ChatShell() {
       setLoaded(true);
       void refreshMemories();
       void refreshUsage();
+      void (async () => {
+        try {
+          const response = await fetch("/api/letters/sync", { method: "POST" });
+
+          if (response.status !== 204 && response.ok) {
+            const data = (await response.json()) as { letters: TimeboxLetter[] };
+            setLetters(data.letters);
+            return;
+          }
+        } catch {
+          // Letter generation is intentionally quiet and should not affect chat startup.
+        }
+
+        const response = await fetch("/api/letters");
+        if (!response.ok) return;
+
+        const data = (await response.json()) as { letters: TimeboxLetter[] };
+        setLetters(data.letters);
+      })();
     });
   }, []);
 
@@ -323,6 +353,7 @@ export function ChatShell() {
   );
 
   const isFreshThread = messages.length === 1 && messages[0]?.id === "hello";
+  const hasUnreadLetters = letters.some((letter) => !letter.isRead);
 
   function showNotice(message: string) {
     setNotice(message);
@@ -390,6 +421,37 @@ export function ChatShell() {
     const data = (await response.json()) as UsagePayload;
     setUsage(data.summary);
     setRecentUsage(data.recent ?? []);
+  }
+
+  async function refreshLetters() {
+    const response = await fetch("/api/letters");
+    if (!response.ok) return;
+
+    const data = (await response.json()) as { letters: TimeboxLetter[] };
+    setLetters(data.letters);
+  }
+
+  async function openLetterDrawer() {
+    setIsLetterDrawerOpen(true);
+    void refreshLetters();
+  }
+
+  async function selectLetter(letterId: string) {
+    setSelectedLetterId(letterId);
+
+    const target = letters.find((letter) => letter.id === letterId);
+    if (!target || target.isRead) return;
+
+    const response = await fetch("/api/letters", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: letterId }),
+    });
+
+    if (!response.ok) return;
+
+    const data = (await response.json()) as { letters: TimeboxLetter[] };
+    setLetters(data.letters);
   }
 
   async function deleteMemory(memoryId: string) {
@@ -1022,9 +1084,21 @@ export function ChatShell() {
       <div className="mx-auto flex min-h-dvh w-full max-w-3xl flex-col px-4 sm:px-6">
         <header className="sticky top-0 z-30 -mx-4 flex h-16 items-center justify-between gap-3 bg-paper/85 px-4 backdrop-blur-md sm:-mx-6 sm:px-6">
           <div className="flex min-w-0 items-center gap-2.5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-pine text-card shadow-[0_2px_10px_rgba(34,57,42,0.35)]">
+            <button
+              type="button"
+              onClick={() => void openLetterDrawer()}
+              className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-pine text-card shadow-[0_2px_10px_rgba(34,57,42,0.35)] transition hover:bg-pine-deep active:scale-95"
+              aria-label="时光信箱"
+              title="时光信箱"
+            >
               <Leaf size={17} strokeWidth={1.8} />
-            </span>
+              {hasUnreadLetters ? (
+                <span className="absolute right-0 top-0 flex h-2.5 w-2.5" aria-hidden>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-clay opacity-75" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full border border-card bg-clay" />
+                </span>
+              ) : null}
+            </button>
             <div className="min-w-0 leading-tight">
               <p className="font-display text-[17px] tracking-wide">树洞</p>
               <p className="flex items-center gap-1 truncate text-xs text-ink-faint">
@@ -1160,6 +1234,14 @@ export function ChatShell() {
           </div>
         </div>
       </div>
+
+      <TimeboxLetterDrawer
+        open={isLetterDrawerOpen}
+        letters={letters}
+        selectedLetterId={selectedLetterId}
+        onSelect={(letterId) => void selectLetter(letterId)}
+        onClose={() => setIsLetterDrawerOpen(false)}
+      />
 
       <SidePanel open={timelineOpen} onClose={() => setTimelineOpen(false)} title="时间线">
         <div className="space-y-4">
@@ -2251,6 +2333,130 @@ function ReferencedMemories({ memories }: { memories: MemoryRecord[] }) {
   );
 }
 
+function TimeboxLetterDrawer({
+  open,
+  letters,
+  selectedLetterId,
+  onSelect,
+  onClose,
+}: {
+  open: boolean;
+  letters: TimeboxLetter[];
+  selectedLetterId: string | null;
+  onSelect: (letterId: string) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
+  const selectedLetter = letters.find((letter) => letter.id === selectedLetterId) ?? null;
+
+  return (
+    <div
+      className={`fixed inset-0 z-50 transition ${open ? "pointer-events-auto" : "pointer-events-none"}`}
+      aria-hidden={!open}
+    >
+      <button
+        type="button"
+        className={`absolute inset-0 bg-pine-deep/25 backdrop-blur-[2px] transition-opacity duration-300 ${
+          open ? "opacity-100" : "opacity-0"
+        }`}
+        onClick={onClose}
+        aria-label="关闭时光信箱"
+        tabIndex={open ? 0 : -1}
+      />
+      <aside
+        className={`fixed left-0 top-0 flex h-full w-full max-w-md transform flex-col border-r border-line bg-paper shadow-[24px_0_60px_rgba(34,57,42,0.18)] transition-transform duration-300 ease-out ${
+          open ? "translate-x-0" : "-translate-x-full"
+        }`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="时光信箱"
+      >
+        <div className="flex h-16 shrink-0 items-center justify-between border-b border-line px-5">
+          <div className="min-w-0">
+            <h2 className="font-display text-lg tracking-wide text-ink">时光信箱</h2>
+            <p className="mt-0.5 text-xs text-ink-faint">过去的片段，会在这里慢慢沉下来。</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition hover:bg-mist"
+            aria-label="关闭"
+            tabIndex={open ? 0 : -1}
+          >
+            <X size={17} />
+          </button>
+        </div>
+
+        <div className="flex min-h-0 flex-1">
+          <nav className="w-24 shrink-0 overflow-y-auto border-r border-line bg-mist/35 px-2 py-4">
+            {letters.length === 0 ? (
+              <p className="px-2 pt-2 text-center text-[11px] leading-5 text-ink-faint">还没有信</p>
+            ) : (
+              <div className="space-y-2">
+                {letters.map((letter) => {
+                  const selected = letter.id === selectedLetter?.id;
+
+                  return (
+                    <button
+                      key={letter.id}
+                      type="button"
+                      onClick={() => onSelect(letter.id)}
+                      className={`relative w-full rounded-xl px-2 py-2 text-left transition ${
+                        selected
+                          ? "bg-card text-pine-deep shadow-[0_2px_12px_rgba(63,58,38,0.08)]"
+                          : "text-ink-faint hover:bg-card/70 hover:text-ink-soft"
+                      }`}
+                      tabIndex={open ? 0 : -1}
+                    >
+                      {!letter.isRead ? (
+                        <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-clay" aria-hidden />
+                      ) : null}
+                      <span className="block text-xs font-medium">{formatLetterMonthDay(letter.createdAt)}</span>
+                      <span className="mt-0.5 block text-[10px]">{formatLetterYear(letter.createdAt)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </nav>
+
+          <section className="min-w-0 flex-1 overflow-y-auto px-6 py-6">
+            {selectedLetter ? (
+              <article className="mx-auto max-w-[32rem] animate-rise">
+                <p className="mb-5 text-xs text-ink-faint">{formatLetterFullDate(selectedLetter.createdAt)}</p>
+                <div className="font-display text-[22px] leading-9 text-pine-deep">给这段时间的你</div>
+                <div className="mt-6 text-[15px] leading-8 text-ink">
+                  <MarkdownMessage content={selectedLetter.content} isUser={false} />
+                </div>
+              </article>
+            ) : (
+              <div className="flex h-full min-h-[360px] flex-col items-center justify-center text-center">
+                <span className="flex h-14 w-14 items-center justify-center rounded-full border border-line bg-card text-pine shadow-[0_10px_36px_rgba(34,57,42,0.10)]">
+                  <Leaf size={22} strokeWidth={1.5} />
+                </span>
+                <p className="mt-4 font-display text-lg tracking-wide text-ink">选一封信慢慢看</p>
+                <p className="mt-2 max-w-56 text-sm leading-6 text-ink-faint">
+                  信会在后台生成，不会打断聊天。
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 function renderMarkdownBlock(block: MarkdownBlock, index: number, isUser: boolean) {
   if (block.type === "heading") {
     const className = "text-[15px] font-semibold leading-7";
@@ -2491,6 +2697,37 @@ function formatMemoryDate(value: string): string {
   }).format(date);
 }
 
+function formatLetterMonthDay(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--/--";
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function formatLetterYear(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "----";
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+  }).format(date);
+}
+
+function formatLetterFullDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  }).format(date);
+}
+
 function toDisplayMessages(messages: StoredChatMessage[]): Message[] {
   if (messages.length === 0) return initialMessages;
 
@@ -2650,6 +2887,7 @@ function formatUsageOperation(value: string) {
     reality_search_decision: "联网判定",
     web_search: "联网搜索",
     holiday_lookup: "节假日",
+    timebox_letter: "时光信箱",
   };
 
   return labels[value] ?? value;

@@ -159,6 +159,35 @@ export async function listChatMessages(
   return rows.map(messageFromRow);
 }
 
+export async function listRecentChatMessages(userId: string, limit = 24): Promise<StoredChatMessage[]> {
+  const pool = getPostgresPool();
+
+  if (!pool) {
+    const state = ensureInMemoryState(userId);
+    return [...state.messages.values()]
+      .flat()
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .slice(-limit);
+  }
+
+  await ensureChatSchema(userId);
+
+  const { rows } = await pool.query(
+    `select id, thread_id, role, content, created_at
+    from (
+      select id, thread_id, role, content, created_at
+      from chat_messages
+      where user_id = $1
+      order by created_at desc, id desc
+      limit $2
+    ) recent_messages
+    order by created_at asc, id asc`,
+    [userId, limit],
+  );
+
+  return rows.map(messageFromRow);
+}
+
 export async function appendChatMessages(
   userId: string,
   threadId: string | null | undefined,

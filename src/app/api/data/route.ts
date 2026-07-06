@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { clearAllChatMessages, ensureActiveChatThread, listChatThreads } from "@/lib/chat-history";
+import { clearLetters } from "@/lib/letters";
 import { clearModelUsage, getModelUsageSummary } from "@/lib/model-usage";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { getServerUserId } from "@/lib/server-user";
@@ -17,6 +18,7 @@ export async function DELETE(request: Request) {
   await clearAllChatMessages(userId);
   await repository.clearMemories(userId);
   await repository.setMemoryEnabled(userId, true);
+  await clearLetters(userId);
   await clearModelUsage(userId);
 
   return NextResponse.json({
