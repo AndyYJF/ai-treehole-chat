@@ -24,6 +24,7 @@
   --animate-rise: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
   --animate-veil: veil 0.25s ease-out both;
   --animate-panel: panel 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-panel-left: panel-left 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
   --animate-breathe: breathe 1.5s ease-in-out infinite;
   --animate-shake: shake 0.45s ease-in-out both;
 }
@@ -81,6 +82,17 @@ html[data-theme="dark"] {
   from {
     opacity: 0;
     transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes panel-left {
+  from {
+    opacity: 0;
+    transform: translateX(-32px);
   }
   to {
     opacity: 1;

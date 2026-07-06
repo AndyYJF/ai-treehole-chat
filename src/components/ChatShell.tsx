@@ -2359,24 +2359,20 @@ function TimeboxLetterDrawer({
 
   const selectedLetter = letters.find((letter) => letter.id === selectedLetterId) ?? null;
 
+  if (!open) return null;
+
   return (
     <div
-      className={`fixed inset-0 z-50 transition ${open ? "pointer-events-auto" : "pointer-events-none"}`}
-      aria-hidden={!open}
+      className="animate-veil fixed inset-0 z-50"
     >
       <button
         type="button"
-        className={`absolute inset-0 bg-pine-deep/25 backdrop-blur-[2px] transition-opacity duration-300 ${
-          open ? "opacity-100" : "opacity-0"
-        }`}
+        className="absolute inset-0 bg-pine-deep/25 backdrop-blur-[2px]"
         onClick={onClose}
         aria-label="关闭时光信箱"
-        tabIndex={open ? 0 : -1}
       />
       <aside
-        className={`fixed left-0 top-0 flex h-full w-full max-w-md transform flex-col border-r border-line bg-paper transition-[transform,box-shadow] duration-300 ease-out ${
-          open ? "translate-x-0 shadow-[24px_0_60px_rgba(34,57,42,0.18)]" : "-translate-x-[calc(100%+80px)] shadow-none"
-        }`}
+        className="animate-panel-left fixed left-0 top-0 flex h-full w-full max-w-md flex-col border-r border-line bg-paper shadow-[24px_0_60px_rgba(34,57,42,0.18)]"
         role="dialog"
         aria-modal="true"
         aria-label="时光信箱"
@@ -2391,7 +2387,6 @@ function TimeboxLetterDrawer({
             onClick={onClose}
             className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition hover:bg-mist"
             aria-label="关闭"
-            tabIndex={open ? 0 : -1}
           >
             <X size={17} />
           </button>
