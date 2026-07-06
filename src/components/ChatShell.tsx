@@ -2,6 +2,7 @@
 
 import {
   FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -968,6 +969,13 @@ export function ChatShell() {
 
   triggerProactiveGreetingRef.current = triggerProactiveGreeting;
 
+  function handleInputKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = input.trim();
@@ -1214,6 +1222,7 @@ export function ChatShell() {
                   setInput(event.target.value);
                   resizeTextarea();
                 }}
+                onKeyDown={handleInputKeyDown}
                 rows={1}
                 placeholder="写给我……"
                 aria-label="写给我"
