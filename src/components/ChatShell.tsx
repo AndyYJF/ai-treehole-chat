@@ -2374,8 +2374,8 @@ function TimeboxLetterDrawer({
         tabIndex={open ? 0 : -1}
       />
       <aside
-        className={`fixed left-0 top-0 flex h-full w-full max-w-md transform flex-col border-r border-line bg-paper shadow-[24px_0_60px_rgba(34,57,42,0.18)] transition-transform duration-300 ease-out ${
-          open ? "translate-x-0" : "-translate-x-full"
+        className={`fixed left-0 top-0 flex h-full w-full max-w-md transform flex-col border-r border-line bg-paper transition-[transform,box-shadow] duration-300 ease-out ${
+          open ? "translate-x-0 shadow-[24px_0_60px_rgba(34,57,42,0.18)]" : "-translate-x-[calc(100%+80px)] shadow-none"
         }`}
         role="dialog"
         aria-modal="true"
