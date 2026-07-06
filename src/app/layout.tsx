@@ -13,22 +13,31 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Treehole",
-  description: "A quiet AI chat app with long-term memory.",
-  manifest: "/manifest.webmanifest",
+  title: "AI 私人树洞",
+  description: "安静、可靠的 AI 私人树洞。",
+  manifest: "/manifest.json",
   icons: {
-    icon: "/treehole-icon.svg",
-    apple: "/treehole-icon-192.png",
+    icon: "/icon-192x192.png",
+    apple: "/icon-192x192.png",
   },
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Treehole",
+    title: "私人树洞",
+  },
+  formatDetection: {
+    telephone: false,
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#2f4b37",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f3f0e7" },
+    { media: "(prefers-color-scheme: dark)", color: "#2f4b37" },
+  ],
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
   viewportFit: "cover",
 };
 

@@ -236,6 +236,7 @@ export function ChatShell() {
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const greetingAttemptedRef = useRef(false);
   const greetingInFlightRef = useRef(false);
+  const triggerProactiveGreetingRef = useRef<(threadId: string) => Promise<void>>(async () => {});
   const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
@@ -289,7 +290,7 @@ export function ChatShell() {
 
     if (!shouldTriggerProactiveGreeting(activeThread)) return;
 
-    void triggerProactiveGreeting(activeThread.id);
+    void triggerProactiveGreetingRef.current(activeThread.id);
   }, [activeThread, isThinking, loaded]);
 
   useEffect(() => {
@@ -902,6 +903,8 @@ export function ChatShell() {
       setChatStatus("");
     }
   }
+
+  triggerProactiveGreetingRef.current = triggerProactiveGreeting;
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

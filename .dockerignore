@@ -9,4 +9,6 @@ Dockerfile
 docker-compose.yml
 README.md
 docs
+public/sw.js
+public/workbox-*.js
 
