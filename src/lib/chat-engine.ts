@@ -5,8 +5,9 @@ import { extractMemoryCandidates } from "./memory/extract";
 import { selectRelevantMemories } from "./memory/rerank";
 import type { MemoryCandidate, MemoryRecord } from "./memory/types";
 import { routeModel, type ModelTier, type RoutedModel } from "./model-routing";
+import { recordModelUsage } from "./model-usage";
 import { buildChatMessages } from "./prompt";
-import { buildRealityContext } from "./reality-context";
+import { buildRealityContext, type RealityContextStatus } from "./reality-context";
 
 type RecentMessage = { role: "user" | "assistant"; content: string; createdAt?: string };
 
@@ -17,6 +18,7 @@ type ChatEngineInput = {
   memoryEnabled: boolean;
   temperature: number;
   recentMessages: RecentMessage[];
+  onRealityStatus?: (status: RealityContextStatus) => void;
 };
 
 export type PreparedChatTurn = {
@@ -105,14 +107,18 @@ async function generateReply(state: typeof ChatTurnState.State) {
 }
 
 async function extractMemories(state: typeof ChatTurnState.State) {
+  const start = Date.now();
+  const memoryCandidates = state.memoryEnabled
+    ? await extractMemoryCandidates({
+        userId: state.userId,
+        messageId: state.messageId,
+        userMessage: state.message,
+      })
+    : [];
+  await recordMemoryExtractResult(state.userId, memoryCandidates.length, start);
+
   return {
-    memoryCandidates: state.memoryEnabled
-      ? await extractMemoryCandidates({
-          userId: state.userId,
-          messageId: state.messageId,
-          userMessage: state.message,
-        })
-      : [],
+    memoryCandidates,
   };
 }
 
@@ -181,6 +187,7 @@ export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedC
     userId: input.userId,
     latestMessage: input.message,
     recentMessages: input.recentMessages,
+    onStatus: input.onRealityStatus,
   });
   const promptMessages = buildChatMessages({
     memories,
@@ -207,6 +214,7 @@ export async function finishChatTurn(input: {
   memoryEnabled: boolean;
   memories: MemoryRecord[];
 }) {
+  const start = Date.now();
   const memoryCandidates = input.memoryEnabled
     ? await extractMemoryCandidates({
         userId: input.userId,
@@ -214,6 +222,7 @@ export async function finishChatTurn(input: {
         userMessage: input.message,
       })
     : [];
+  await recordMemoryExtractResult(input.userId, memoryCandidates.length, start);
 
   if (!input.memoryEnabled || memoryCandidates.length === 0) {
     return input.memories.slice(0, 8);
@@ -221,4 +230,28 @@ export async function finishChatTurn(input: {
 
   const repository = getMemoryRepository();
   return (await repository.addMemoryCandidates(input.userId, memoryCandidates)).slice(0, 8);
+}
+
+async function recordMemoryExtractResult(userId: string, candidateCount: number, start: number) {
+  try {
+    await recordModelUsage({
+      userId,
+      provider: "app",
+      operation: "memory_extract_result",
+      model: "memory_candidates",
+      streamed: false,
+      success: true,
+      statusCode: null,
+      latencyMs: Date.now() - start,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      promptCacheHitTokens: null,
+      promptCacheMissTokens: null,
+      reasoningTokens: null,
+      errorMessage: `candidates=${candidateCount}`,
+    });
+  } catch {
+    // Observability must not block chat.
+  }
 }

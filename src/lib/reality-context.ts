@@ -1,5 +1,6 @@
 import { getRuntimeConfig } from "./app-config";
 import { callDeepSeekJson } from "./deepseek";
+import { recordModelUsage } from "./model-usage";
 
 type PublicHoliday = {
   date: string;
@@ -19,17 +20,27 @@ type SearchDecision = {
   reason: string;
 };
 
+export type RealityContextStatus =
+  | { type: "checking_search_need"; label: string }
+  | { type: "searching_web"; label: string }
+  | { type: "search_skipped"; label: string }
+  | { type: "search_unavailable"; label: string }
+  | { type: "search_failed"; label: string }
+  | { type: "search_done"; label: string };
+
 const holidayCache = new Map<string, { expiresAt: number; holidays: PublicHoliday[] }>();
 
 export async function buildRealityContext(input: {
   userId: string;
   latestMessage: string;
   recentMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+  onStatus?: (status: RealityContextStatus) => void;
 }) {
   const config = await getRuntimeConfig();
   const now = new Date();
   const countryCode = normalizeCountryCode(config.realityCountryCode);
   const message = input.latestMessage.trim();
+  input.onStatus?.({ type: "checking_search_need", label: "判断是否需要联网" });
   const searchDecision =
     config.tavilyApiKey || config.braveSearchApiKey
       ? await decideSearchWithLlm({
@@ -44,10 +55,17 @@ export async function buildRealityContext(input: {
           query: "",
           reason: "未配置联网搜索 key",
         };
+  if (!config.tavilyApiKey && !config.braveSearchApiKey) {
+    input.onStatus?.({ type: "search_unavailable", label: "未配置联网搜索" });
+  } else if (searchDecision.shouldSearch) {
+    input.onStatus?.({ type: "searching_web", label: "正在联网搜索" });
+  } else {
+    input.onStatus?.({ type: "search_skipped", label: "无需联网搜索" });
+  }
   const [holidayContext, searchContext] = await Promise.all([
-    getHolidayContext(now, countryCode),
+    getHolidayContext(now, countryCode, input.userId),
     searchDecision.shouldSearch
-      ? getSearchContext(searchDecision.query || message, config, searchDecision)
+      ? getSearchContext(searchDecision.query || message, config, searchDecision, input.userId, input.onStatus)
       : Promise.resolve(`联网检索：LLM 判定本轮无需搜索。原因：${searchDecision.reason || "未说明"}`),
   ]);
 
@@ -60,7 +78,8 @@ export async function buildRealityContext(input: {
   ].join("\n");
 }
 
-async function getHolidayContext(now: Date, countryCode: string) {
+async function getHolidayContext(now: Date, countryCode: string, userId: string) {
+  const start = Date.now();
   try {
     const currentYear = getUtc8Year(now);
     const holidays = [
@@ -74,12 +93,32 @@ async function getHolidayContext(now: Date, countryCode: string) {
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 6);
 
+    await recordRealityEvent({
+      userId,
+      provider: "nager_date",
+      operation: "holiday_lookup",
+      model: countryCode,
+      success: true,
+      statusCode: 200,
+      start,
+    });
+
     return [
       `今日节假日：${todayHolidays.length > 0 ? todayHolidays.map(formatHoliday).join("；") : "无公开节假日记录"}`,
       `近期节假日：${upcoming.length > 0 ? upcoming.map(formatHoliday).join("；") : "暂无近期公开节假日记录"}`,
       "节假日说明：该数据用于公共节假日感知，不保证覆盖补班/调休工作日。",
     ].join("\n");
-  } catch {
+  } catch (error) {
+    await recordRealityEvent({
+      userId,
+      provider: "nager_date",
+      operation: "holiday_lookup",
+      model: countryCode,
+      success: false,
+      statusCode: null,
+      start,
+      errorMessage: error instanceof Error ? error.message : "holiday lookup failed",
+    });
     return "节假日查询失败：不要声称已确认节假日安排。";
   }
 }
@@ -158,17 +197,22 @@ async function getSearchContext(
   query: string,
   config: Awaited<ReturnType<typeof getRuntimeConfig>>,
   decision: SearchDecision,
+  userId: string,
+  onStatus?: (status: RealityContextStatus) => void,
 ) {
-  const results = await searchWeb(query, config);
+  const results = await searchWeb(query, config, userId);
 
   if (results.length === 0) {
     if (!config.tavilyApiKey && !config.braveSearchApiKey) {
+      onStatus?.({ type: "search_unavailable", label: "未配置联网搜索" });
       return "联网检索：未配置 TAVILY_API_KEY 或 BRAVE_SEARCH_API_KEY。用户询问实时信息时，应说明当前无法联网确认。";
     }
 
+    onStatus?.({ type: "search_failed", label: "联网搜索未得到可靠结果" });
     return `联网检索：LLM 判定需要搜索，但未获得可靠结果。判定原因：${decision.reason || "未说明"}。用户询问实时信息时，应说明检索结果不足。`;
   }
 
+  onStatus?.({ type: "search_done", label: "已完成联网搜索" });
   return [
     `联网检索：LLM 判定需要搜索。判定原因：${decision.reason || "未说明"}。搜索词：${query}`,
     "联网检索结果：",
@@ -196,20 +240,21 @@ function normalizeSearchDecision(value: unknown, fallbackQuery: string): SearchD
   };
 }
 
-async function searchWeb(query: string, config: Awaited<ReturnType<typeof getRuntimeConfig>>) {
+async function searchWeb(query: string, config: Awaited<ReturnType<typeof getRuntimeConfig>>, userId: string) {
   if (config.tavilyApiKey) {
-    const results = await searchTavily(query, config.tavilyApiKey);
+    const results = await searchTavily(query, config.tavilyApiKey, userId);
     if (results.length > 0) return results;
   }
 
   if (config.braveSearchApiKey) {
-    return searchBrave(query, config.braveSearchApiKey);
+    return searchBrave(query, config.braveSearchApiKey, userId);
   }
 
   return [];
 }
 
-async function searchTavily(query: string, apiKey: string): Promise<SearchResult[]> {
+async function searchTavily(query: string, apiKey: string, userId: string): Promise<SearchResult[]> {
+  const start = Date.now();
   try {
     const response = await fetchWithTimeout(
       "https://api.tavily.com/search",
@@ -229,25 +274,60 @@ async function searchTavily(query: string, apiKey: string): Promise<SearchResult
       7000,
     );
 
-    if (!response.ok) return [];
+    if (!response.ok) {
+      await recordRealityEvent({
+        userId,
+        provider: "tavily",
+        operation: "web_search",
+        model: "tavily_search",
+        success: false,
+        statusCode: response.status,
+        start,
+        errorMessage: await response.text(),
+      });
+      return [];
+    }
 
     const data = (await response.json()) as {
       results?: Array<{ title?: string; url?: string; content?: string }>;
     };
 
-    return (data.results ?? [])
+    const results = (data.results ?? [])
       .map((result) => ({
         title: clean(result.title),
         url: clean(result.url),
         snippet: clean(result.content),
       }))
       .filter((result) => result.title && result.url);
-  } catch {
+
+    await recordRealityEvent({
+      userId,
+      provider: "tavily",
+      operation: "web_search",
+      model: "tavily_search",
+      success: true,
+      statusCode: response.status,
+      start,
+      errorMessage: `results=${results.length}`,
+    });
+    return results;
+  } catch (error) {
+    await recordRealityEvent({
+      userId,
+      provider: "tavily",
+      operation: "web_search",
+      model: "tavily_search",
+      success: false,
+      statusCode: null,
+      start,
+      errorMessage: error instanceof Error ? error.message : "tavily search failed",
+    });
     return [];
   }
 }
 
-async function searchBrave(query: string, apiKey: string): Promise<SearchResult[]> {
+async function searchBrave(query: string, apiKey: string, userId: string): Promise<SearchResult[]> {
+  const start = Date.now();
   try {
     const url = new URL("https://api.search.brave.com/res/v1/web/search");
     url.searchParams.set("q", query);
@@ -265,7 +345,19 @@ async function searchBrave(query: string, apiKey: string): Promise<SearchResult[
       7000,
     );
 
-    if (!response.ok) return [];
+    if (!response.ok) {
+      await recordRealityEvent({
+        userId,
+        provider: "brave_search",
+        operation: "web_search",
+        model: "brave_web",
+        success: false,
+        statusCode: response.status,
+        start,
+        errorMessage: await response.text(),
+      });
+      return [];
+    }
 
     const data = (await response.json()) as {
       web?: {
@@ -273,14 +365,36 @@ async function searchBrave(query: string, apiKey: string): Promise<SearchResult[
       };
     };
 
-    return (data.web?.results ?? [])
+    const results = (data.web?.results ?? [])
       .map((result) => ({
         title: clean(result.title),
         url: clean(result.url),
         snippet: clean(result.description),
       }))
       .filter((result) => result.title && result.url);
-  } catch {
+
+    await recordRealityEvent({
+      userId,
+      provider: "brave_search",
+      operation: "web_search",
+      model: "brave_web",
+      success: true,
+      statusCode: response.status,
+      start,
+      errorMessage: `results=${results.length}`,
+    });
+    return results;
+  } catch (error) {
+    await recordRealityEvent({
+      userId,
+      provider: "brave_search",
+      operation: "web_search",
+      model: "brave_web",
+      success: false,
+      statusCode: null,
+      start,
+      errorMessage: error instanceof Error ? error.message : "brave search failed",
+    });
     return [];
   }
 }
@@ -335,4 +449,37 @@ function normalizeCountryCode(value: string) {
 
 function clean(value: string | undefined) {
   return (value ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+async function recordRealityEvent(input: {
+  userId: string;
+  provider: string;
+  operation: string;
+  model: string;
+  success: boolean;
+  statusCode: number | null;
+  start: number;
+  errorMessage?: string;
+}) {
+  try {
+    await recordModelUsage({
+      userId: input.userId,
+      provider: input.provider,
+      operation: input.operation,
+      model: input.model,
+      streamed: false,
+      success: input.success,
+      statusCode: input.statusCode,
+      latencyMs: Date.now() - input.start,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      promptCacheHitTokens: null,
+      promptCacheMissTokens: null,
+      reasoningTokens: null,
+      errorMessage: input.errorMessage?.slice(0, 800) ?? null,
+    });
+  } catch {
+    // Observability must not block chat.
+  }
 }

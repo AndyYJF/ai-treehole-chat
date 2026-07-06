@@ -12,6 +12,7 @@ import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { modelTierSchema } from "@/lib/model-routing";
+import type { RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
 import { summarizeThreadTitle } from "@/lib/thread-title";
 
@@ -114,7 +115,15 @@ function createChatStream(
       };
 
       try {
-        const prepared = await prepareChatTurn(input);
+        const prepared = await prepareChatTurn({
+          ...input,
+          onRealityStatus: (status: RealityContextStatus) => {
+            send({
+              type: "status",
+              status,
+            });
+          },
+        });
         let reply = "";
 
         send({
@@ -171,6 +180,7 @@ function createChatStream(
           type: "done",
           routed: prepared.routed,
           memories,
+          usedMemories: prepared.memories,
           activeThread,
           threads: await listChatThreads(input.userId),
           messages,

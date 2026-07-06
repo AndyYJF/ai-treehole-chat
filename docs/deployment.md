@@ -70,6 +70,8 @@ postgresql://treehole:treehole-local-change-me@db:5432/treehole
 
 `REALITY_COUNTRY_CODE` 默认 `CN`，用于查询公开节假日。`TAVILY_API_KEY` 和 `BRAVE_SEARCH_API_KEY` 是可选联网搜索增强；是否搜索由一次轻量 LLM JSON 判定决定。不配置搜索 Key 时，聊天仍会获得当前时间和节假日上下文，但不会假装已经联网检索。
 
+联网判定、联网搜索、节假日查询和记忆抽取结果会写入 `model_usage_events`，设置面板的用量区域会显示最近事件。搜索失败只会降级为“结果不足/不确定”，不会阻塞主聊天。
+
 当前直连 IP 使用 HTTP，因此 `TREEHOLE_COOKIE_SECURE=false`。绑定 HTTPS 域名后应改为 `true`。
 
 ## 数据持久化

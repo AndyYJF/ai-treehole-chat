@@ -51,6 +51,7 @@ type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  usedMemories?: MemoryRecord[];
 };
 
 type StoredChatMessage = Message & {
@@ -89,6 +90,7 @@ type ChatThread = {
 
 type ChatStreamEvent =
   | { type: "route"; routed: { label: string } }
+  | { type: "status"; status: { type: string; label: string } }
   | { type: "reasoning" }
   | { type: "token"; delta: string }
   | {
@@ -97,6 +99,7 @@ type ChatStreamEvent =
       activeThread: ChatThread;
       threads: ChatThread[];
       memories: MemoryRecord[];
+      usedMemories?: MemoryRecord[];
       messages: StoredChatMessage[];
     }
   | { type: "error"; error: string };
@@ -114,8 +117,22 @@ type UsageSummary = {
   averageLatencyMs: number | null;
 };
 
+type UsageRecord = {
+  id: string;
+  provider: string;
+  operation: string;
+  model: string;
+  success: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  totalTokens: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+};
+
 type UsagePayload = {
   summary: UsageSummary;
+  recent: UsageRecord[];
 };
 
 type LocalState = {
@@ -202,7 +219,9 @@ export function ChatShell() {
   const [memoryEnabled, setMemoryEnabledState] = useState(true);
   const [temperature, setTemperature] = useState(0.72);
   const [routeLabel, setRouteLabel] = useState("自动");
+  const [chatStatus, setChatStatus] = useState("");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [recentUsage, setRecentUsage] = useState<UsageRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [notice, setNotice] = useState("");
   const [threads, setThreads] = useState<ChatThread[]>([]);
@@ -355,6 +374,7 @@ export function ChatShell() {
 
     const data = (await response.json()) as UsagePayload;
     setUsage(data.summary);
+    setRecentUsage(data.recent ?? []);
   }
 
   async function deleteMemory(memoryId: string) {
@@ -596,6 +616,7 @@ export function ChatShell() {
 
     const data = (await response.json()) as UsagePayload;
     setUsage(data.summary);
+    setRecentUsage(data.recent ?? []);
   }
 
   async function clearAllData() {
@@ -619,6 +640,7 @@ export function ChatShell() {
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
     setUsage(data.usage);
+    setRecentUsage([]);
     setTier("auto");
     setRouteLabel("自动");
     setTemperature(0.72);
@@ -790,6 +812,7 @@ export function ChatShell() {
     ]);
     setInput("");
     setIsThinking(true);
+    setChatStatus("准备回复");
     startThinkingTimer();
     requestAnimationFrame(resizeTextarea);
 
@@ -812,8 +835,10 @@ export function ChatShell() {
 
       await readChatStream(response, {
         onRoute: (label) => setRouteLabel(label),
+        onStatus: (label) => setChatStatus(label),
         onReasoning: () => setIsThinking(true),
         onToken: (delta) => {
+          setChatStatus("");
           setMessages((current) =>
             current.map((message) =>
               message.id === assistantMessage.id
@@ -836,6 +861,12 @@ export function ChatShell() {
                 ? {
                     ...message,
                     content: latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
+                    usedMemories: data.usedMemories ?? [],
+                  }
+                : message.id === assistantMessage.id
+                  ? {
+                    ...message,
+                    usedMemories: data.usedMemories ?? [],
                   }
                 : message,
             ),
@@ -855,6 +886,7 @@ export function ChatShell() {
     } finally {
       stopThinkingTimer();
       setIsThinking(false);
+      setChatStatus("");
     }
   }
 
@@ -951,6 +983,9 @@ export function ChatShell() {
                       }`}
                     >
                       <MarkdownMessage content={message.content} isUser={message.role === "user"} />
+                      {message.role === "assistant" && message.usedMemories && message.usedMemories.length > 0 ? (
+                        <ReferencedMemories memories={message.usedMemories} />
+                      ) : null}
                     </div>
                   </article>
                 ) : null,
@@ -965,7 +1000,7 @@ export function ChatShell() {
                       <span className="animate-breathe h-1.5 w-1.5 rounded-full bg-pine [animation-delay:0.4s]" />
                     </span>
                     <span className="text-sm text-ink-faint">
-                      思考中（{thinkingSeconds}秒）
+                      {chatStatus ? `${chatStatus}，` : ""}思考中（{thinkingSeconds}秒）
                     </span>
                   </div>
                 </div>
@@ -1229,6 +1264,16 @@ export function ChatShell() {
               <UsageMetric label="缓存命中" value={formatPercent(usage?.cacheHitRate)} />
               <UsageMetric label="平均延迟" value={formatLatency(usage?.averageLatencyMs)} />
             </div>
+            {recentUsage.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                <PanelLabel>最近事件</PanelLabel>
+                <div className="space-y-1.5">
+                  {recentUsage.slice(0, 8).map((record) => (
+                    <UsageEvent key={record.id} record={record} />
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="rounded-2xl border border-line bg-card p-4">
@@ -2067,6 +2112,28 @@ function MarkdownMessage({ content, isUser }: { content: string; isUser: boolean
   );
 }
 
+function ReferencedMemories({ memories }: { memories: MemoryRecord[] }) {
+  return (
+    <details className="mt-3 rounded-2xl border border-line bg-mist/35 px-3 py-2 text-xs text-ink-soft">
+      <summary className="cursor-pointer select-none text-ink-faint">
+        本轮参考的记忆（{memories.length}）
+      </summary>
+      <div className="mt-2 space-y-2">
+        {memories.slice(0, 6).map((memory) => (
+          <div key={memory.id} className="rounded-xl bg-card/70 px-2.5 py-2">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
+              <span>{memoryTypeLabels[memory.type]}</span>
+              <span>重要度 {memory.importance}</span>
+              <span>{formatMemoryDate(memory.lastSeenAt)}</span>
+            </div>
+            <p className="leading-5 text-ink-soft">{memory.content}</p>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function renderMarkdownBlock(block: MarkdownBlock, index: number, isUser: boolean) {
   if (block.type === "heading") {
     const className = "text-[15px] font-semibold leading-7";
@@ -2330,6 +2397,7 @@ async function readChatStream(
   response: Response,
   handlers: {
     onRoute: (label: string) => void;
+    onStatus: (label: string) => void;
     onReasoning: () => void;
     onToken: (delta: string) => void;
     onDone: (data: Extract<ChatStreamEvent, { type: "done" }>) => void;
@@ -2377,6 +2445,7 @@ function handleChatStreamLine(
   line: string,
   handlers: {
     onRoute: (label: string) => void;
+    onStatus: (label: string) => void;
     onReasoning: () => void;
     onToken: (delta: string) => void;
     onDone: (data: Extract<ChatStreamEvent, { type: "done" }>) => void;
@@ -2393,6 +2462,11 @@ function handleChatStreamLine(
 
   if (event.type === "token") {
     handlers.onToken(event.delta);
+    return;
+  }
+
+  if (event.type === "status") {
+    handlers.onStatus(event.status.label);
     return;
   }
 
@@ -2424,6 +2498,40 @@ function UsageMetric({ label, value }: { label: string; value: string }) {
       <p className="mt-0.5 truncate font-mono text-sm text-ink">{value}</p>
     </div>
   );
+}
+
+function UsageEvent({ record }: { record: UsageRecord }) {
+  return (
+    <div className="rounded-xl border border-line bg-mist/35 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="min-w-0 truncate text-xs text-ink-soft">
+          {formatUsageOperation(record.operation)} · {record.provider}
+        </p>
+        <span className={`shrink-0 text-[11px] ${record.success ? "text-pine" : "text-clay"}`}>
+          {record.success ? "成功" : "失败"}
+        </span>
+      </div>
+      <p className="mt-1 truncate font-mono text-[11px] text-ink-faint">
+        {formatLatency(record.latencyMs)}
+        {record.totalTokens ? ` · ${formatCompact(record.totalTokens)} tokens` : ""}
+        {record.statusCode ? ` · ${record.statusCode}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function formatUsageOperation(value: string) {
+  const labels: Record<string, string> = {
+    chat: "聊天",
+    memory_extract: "记忆抽取",
+    memory_extract_result: "记忆结果",
+    title_summarize: "标题生成",
+    reality_search_decision: "联网判定",
+    web_search: "联网搜索",
+    holiday_lookup: "节假日",
+  };
+
+  return labels[value] ?? value;
 }
 
 function formatCompact(value: number | null | undefined): string {
