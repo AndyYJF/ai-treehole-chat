@@ -14,6 +14,9 @@ type SetupForm = {
   siliconFlowRerankModel: string;
   tavilyApiKey: string;
   braveSearchApiKey: string;
+  visionApiKey: string;
+  visionBaseUrl: string;
+  visionModelName: string;
   realityCountryCode: string;
 };
 
@@ -34,6 +37,9 @@ const initialForm: SetupForm = {
   siliconFlowRerankModel: "Qwen/Qwen3-Reranker-0.6B",
   tavilyApiKey: "",
   braveSearchApiKey: "",
+  visionApiKey: "",
+  visionBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  visionModelName: "gemini-3.1-pro-preview",
   realityCountryCode: "CN",
 };
 
@@ -58,6 +64,8 @@ export function SetupWizard() {
     return (
       isUrl(form.siliconFlowBaseUrl) &&
       form.siliconFlowRerankModel.trim().length > 0 &&
+      isUrl(form.visionBaseUrl) &&
+      form.visionModelName.trim().length > 0 &&
       /^[A-Za-z]{2}$/.test(form.realityCountryCode.trim())
     );
   }, [form, step]);
@@ -225,7 +233,25 @@ export function SetupWizard() {
                 placeholder="可留空"
               />
               <Field
-                label="现实地区代码"
+                label="Vision Key"
+                value={form.visionApiKey}
+                onChange={(value) => update("visionApiKey", value)}
+                type="password"
+                autoComplete="off"
+                placeholder="optional"
+              />
+              <Field
+                label="Vision Base URL"
+                value={form.visionBaseUrl}
+                onChange={(value) => update("visionBaseUrl", value)}
+              />
+              <Field
+                label="Vision Model"
+                value={form.visionModelName}
+                onChange={(value) => update("visionModelName", value)}
+              />
+              <Field
+                label="Reality Country Code"
                 value={form.realityCountryCode}
                 onChange={(value) => update("realityCountryCode", value.toUpperCase())}
                 placeholder="CN"

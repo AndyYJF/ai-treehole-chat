@@ -2,6 +2,8 @@
 
 import {
   FormEvent,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
@@ -18,6 +20,7 @@ import {
   Download,
   Eye,
   FileText,
+  ImagePlus,
   Leaf,
   LogOut,
   MessageSquare,
@@ -144,6 +147,18 @@ type TimeboxLetter = {
   createdAt: string;
 };
 
+type SelectedImage = {
+  base64: string;
+  previewUrl: string;
+  name: string;
+};
+
+type VisionSettings = {
+  visionApiKey: string;
+  visionBaseUrl: string;
+  visionModelName: string;
+};
+
 type LocalState = {
   tier: ModelTier;
   routeLabel: string;
@@ -207,6 +222,7 @@ const themeOptions: Array<{
 export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
+  const [selectedImage, setSelectedImage] = useState<SelectedImage | null>(null);
   const [tier, setTier] = useState<ModelTier>("auto");
   const [isThinking, setIsThinking] = useState(false);
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
@@ -240,9 +256,16 @@ export function ChatShell() {
   const [letters, setLetters] = useState<TimeboxLetter[]>([]);
   const [isLetterDrawerOpen, setIsLetterDrawerOpen] = useState(false);
   const [selectedLetterId, setSelectedLetterId] = useState<string | null>(null);
+  const [visionSettings, setVisionSettings] = useState<VisionSettings>({
+    visionApiKey: "",
+    visionBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    visionModelName: "gemini-3.1-pro-preview",
+  });
+  const [isSavingVisionSettings, setIsSavingVisionSettings] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const thinkingTimerRef = useRef<number | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -278,6 +301,7 @@ export function ChatShell() {
       setLoaded(true);
       void refreshMemories();
       void refreshUsage();
+      void refreshVisionSettings();
       void (async () => {
         try {
           const response = await fetch("/api/letters/sync", { method: "POST" });
@@ -410,8 +434,8 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
-    setThreads(data.threads);
-    setActiveThread(data.activeThread);
+    setThreads(sanitizeChatThreads(data.threads));
+    setActiveThread(sanitizeChatThread(data.activeThread));
     setMessages(toDisplayMessages(data.messages));
   }
 
@@ -422,6 +446,58 @@ export function ChatShell() {
     const data = (await response.json()) as UsagePayload;
     setUsage(data.summary);
     setRecentUsage(data.recent ?? []);
+  }
+
+  async function refreshVisionSettings() {
+    const response = await fetch("/api/setup");
+    if (!response.ok) return;
+
+    const data = (await response.json()) as {
+      defaults?: Partial<VisionSettings>;
+    };
+
+    setVisionSettings((current) => ({
+      visionApiKey: data.defaults?.visionApiKey ?? current.visionApiKey,
+      visionBaseUrl: data.defaults?.visionBaseUrl ?? current.visionBaseUrl,
+      visionModelName: data.defaults?.visionModelName ?? current.visionModelName,
+    }));
+  }
+
+  function updateVisionSetting<Key extends keyof VisionSettings>(key: Key, value: VisionSettings[Key]) {
+    setVisionSettings((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
+  async function saveVisionSettings() {
+    if (isSavingVisionSettings) return;
+
+    setIsSavingVisionSettings(true);
+
+    try {
+      const response = await fetch("/api/setup", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(visionSettings),
+      });
+
+      if (!response.ok) throw new Error("save failed");
+
+      const data = (await response.json()) as { defaults?: Partial<VisionSettings> };
+      if (data.defaults) {
+        setVisionSettings((current) => ({
+          visionApiKey: data.defaults?.visionApiKey ?? current.visionApiKey,
+          visionBaseUrl: data.defaults?.visionBaseUrl ?? current.visionBaseUrl,
+          visionModelName: data.defaults?.visionModelName ?? current.visionModelName,
+        }));
+      }
+      showNotice("Vision 配置已保存。");
+    } catch {
+      showNotice("Vision 配置没有保存成功。");
+    } finally {
+      setIsSavingVisionSettings(false);
+    }
   }
 
   async function refreshLetters() {
@@ -712,8 +788,8 @@ export function ChatShell() {
     };
 
     window.localStorage.removeItem(storageKey);
-    setActiveThread(data.activeThread);
-    setThreads(data.threads);
+    setActiveThread(sanitizeChatThread(data.activeThread));
+    setThreads(sanitizeChatThreads(data.threads));
     setMessages(initialMessages);
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
@@ -776,8 +852,8 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
-    setActiveThread(data.activeThread);
-    setThreads(data.threads);
+    setActiveThread(sanitizeChatThread(data.activeThread));
+    setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setRouteLabel("自动");
     setInput("");
@@ -810,8 +886,8 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
-    setActiveThread(data.activeThread);
-    setThreads(data.threads);
+    setActiveThread(sanitizeChatThread(data.activeThread));
+    setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setTimelineOpen(false);
     setRouteLabel("自动");
@@ -859,8 +935,8 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
-    setActiveThread(data.activeThread);
-    setThreads(data.threads);
+    setActiveThread(sanitizeChatThread(data.activeThread));
+    setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setRouteLabel("自动");
     setInput("");
@@ -933,8 +1009,8 @@ export function ChatShell() {
         },
         onDone: (data) => {
           setRouteLabel(data.routed.label);
-          setActiveThread(data.activeThread);
-          setThreads(data.threads);
+          setActiveThread(sanitizeChatThread(data.activeThread));
+          setThreads(sanitizeChatThreads(data.threads));
           setMemories(data.memories);
           setMessages((current) =>
             current.map((message) =>
@@ -969,6 +1045,61 @@ export function ChatShell() {
 
   triggerProactiveGreetingRef.current = triggerProactiveGreeting;
 
+  async function selectImageFile(file: File | undefined) {
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      showNotice("请选择图片文件。");
+      return;
+    }
+
+    try {
+      const compressed = await compressImageToJpegBase64(file);
+      setSelectedImage({
+        base64: compressed,
+        previewUrl: compressed,
+        name: file.name || "image.jpg",
+      });
+    } catch {
+      showNotice("图片没有处理成功，换一张试试。");
+    }
+  }
+
+  function removeSelectedImage() {
+    setSelectedImage(null);
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  }
+
+  function handleImagePaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const file = Array.from(event.clipboardData.files).find((item) =>
+      item.type.startsWith("image/"),
+    );
+    if (!file) return;
+
+    event.preventDefault();
+    void selectImageFile(file);
+  }
+
+  function handleImageDrop(event: ReactDragEvent<HTMLTextAreaElement>) {
+    const file = Array.from(event.dataTransfer.files).find((item) =>
+      item.type.startsWith("image/"),
+    );
+    if (!file) return;
+
+    event.preventDefault();
+    void selectImageFile(file);
+  }
+
+  function handleImageDragOver(event: ReactDragEvent<HTMLTextAreaElement>) {
+    if (
+      Array.from(event.dataTransfer.items).some((item) =>
+        item.type.startsWith("image/"),
+      )
+    ) {
+      event.preventDefault();
+    }
+  }
+
   function handleInputKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
 
@@ -978,13 +1109,16 @@ export function ChatShell() {
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const content = input.trim();
-    if (!content || isThinking) return;
+    const textContent = input.trim();
+    if ((!textContent && !selectedImage) || isThinking) return;
+
+    const content = textContent || "请看看这张图片。";
+    const imageBase64 = selectedImage?.base64;
 
     const userMessage: Message = {
       id: createClientId(),
       role: "user",
-      content,
+      content: selectedImage ? `【图片】${content}` : content,
     };
     const assistantMessage: Message = {
       id: createClientId(),
@@ -998,6 +1132,7 @@ export function ChatShell() {
       assistantMessage,
     ]);
     setInput("");
+    setSelectedImage(null);
     setIsThinking(true);
     setChatStatus("准备回复");
     startThinkingTimer();
@@ -1014,6 +1149,7 @@ export function ChatShell() {
           memoryEnabled,
           temperature,
           stream: true,
+          imageBase64,
           recentMessages,
         }),
       });
@@ -1039,8 +1175,8 @@ export function ChatShell() {
         },
         onDone: (data) => {
           setRouteLabel(data.routed.label);
-          setActiveThread(data.activeThread);
-          setThreads(data.threads);
+          setActiveThread(sanitizeChatThread(data.activeThread));
+          setThreads(sanitizeChatThreads(data.threads));
           setMemories(data.memories);
           setMessages((current) =>
             current.map((message) =>
@@ -1213,8 +1349,52 @@ export function ChatShell() {
           <div className="pointer-events-auto mx-auto w-full max-w-3xl">
             <form
               onSubmit={sendMessage}
-              className="flex items-end gap-2 rounded-[26px] border border-line bg-card p-2 transition focus-within:border-line-strong"
+              className="rounded-[26px] border border-line bg-card p-2 transition focus-within:border-line-strong"
             >
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => {
+                  void selectImageFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+              {selectedImage ? (
+                <div className="mb-2 flex items-center gap-3 rounded-2xl border border-line bg-mist/45 p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={selectedImage.previewUrl}
+                    alt={selectedImage.name}
+                    className="h-14 w-14 shrink-0 rounded-xl object-cover"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs text-ink-soft">{selectedImage.name}</p>
+                    <p className="mt-0.5 text-[11px] text-ink-faint">将先识图，再交给树洞回复</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={removeSelectedImage}
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-clay transition hover:bg-clay-soft"
+                    aria-label="移除图片"
+                    title="移除图片"
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              ) : null}
+              <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={isThinking}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-ink-faint transition hover:bg-mist hover:text-pine active:scale-95 disabled:cursor-not-allowed disabled:text-line-strong"
+                aria-label="上传图片"
+                title="上传图片"
+              >
+                <ImagePlus size={17} strokeWidth={1.8} />
+              </button>
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -1223,6 +1403,9 @@ export function ChatShell() {
                   resizeTextarea();
                 }}
                 onKeyDown={handleInputKeyDown}
+                onPaste={handleImagePaste}
+                onDrop={handleImageDrop}
+                onDragOver={handleImageDragOver}
                 rows={1}
                 placeholder="写给我……"
                 aria-label="写给我"
@@ -1230,12 +1413,13 @@ export function ChatShell() {
               />
               <button
                 type="submit"
-                disabled={!input.trim() || isThinking}
+                disabled={(!input.trim() && !selectedImage) || isThinking}
                 className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-pine text-card transition hover:bg-pine-deep active:scale-95 disabled:cursor-not-allowed disabled:bg-line-strong"
                 aria-label="发送"
               >
                 <Send size={17} strokeWidth={1.8} />
               </button>
+              </div>
             </form>
             <p className="mt-2 text-center text-[11px] text-ink-faint">
               这里只有你和树洞，数据随时可以导出或清空。
@@ -1448,6 +1632,38 @@ export function ChatShell() {
                 </div>
               </div>
             ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-line bg-card p-4">
+            <PanelLabel>Vision</PanelLabel>
+            <div className="mt-3 space-y-3">
+              <SettingsInput
+                label="Vision Key"
+                value={visionSettings.visionApiKey}
+                onChange={(value) => updateVisionSetting("visionApiKey", value)}
+                type="password"
+                autoComplete="off"
+              />
+              <SettingsInput
+                label="Vision Base URL"
+                value={visionSettings.visionBaseUrl}
+                onChange={(value) => updateVisionSetting("visionBaseUrl", value)}
+              />
+              <SettingsInput
+                label="Vision Model"
+                value={visionSettings.visionModelName}
+                onChange={(value) => updateVisionSetting("visionModelName", value)}
+              />
+              <button
+                type="button"
+                onClick={() => void saveVisionSettings()}
+                disabled={isSavingVisionSettings}
+                className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-pine px-3 text-sm text-card transition hover:bg-pine-deep disabled:cursor-not-allowed disabled:bg-line-strong"
+              >
+                <Check size={15} />
+                {isSavingVisionSettings ? "保存中" : "保存 Vision 配置"}
+              </button>
+            </div>
           </section>
 
           <section className="rounded-2xl border border-line bg-card p-4">
@@ -2738,8 +2954,41 @@ function toDisplayMessages(messages: StoredChatMessage[]): Message[] {
   return messages.map((message) => ({
     id: message.id,
     role: message.role,
-    content: message.content,
+    content: message.role === "user" ? sanitizeVisionDisplayContent(message.content) : message.content,
   }));
+}
+
+function sanitizeVisionDisplayContent(content: string) {
+  const looksLikeVisionContext =
+    content.startsWith("[User uploaded an image.") ||
+    content.includes("[\u7528\u6237\u4e0a\u4f20\u4e86\u4e00\u5f20\u56fe\u7247") ||
+    (content.startsWith("[") && content.includes("\n\n[") && content.length > 120);
+
+  if (!looksLikeVisionContext) {
+    return content;
+  }
+
+  const captionMarker = content.match(/\n\n\[[^\]\n]+\]\n/);
+  const caption = captionMarker
+    ? content.slice((captionMarker.index ?? 0) + captionMarker[0].length).trim()
+    : "";
+  const displayCaption =
+    caption && !caption.includes("\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587")
+      ? caption
+      : "\u8bf7\u770b\u770b\u8fd9\u5f20\u56fe\u7247\u3002";
+
+  return `\u3010\u56fe\u7247\u3011${displayCaption}`;
+}
+
+function sanitizeChatThread(thread: ChatThread): ChatThread {
+  return {
+    ...thread,
+    title: sanitizeVisionDisplayContent(thread.title),
+  };
+}
+
+function sanitizeChatThreads(threads: ChatThread[]): ChatThread[] {
+  return threads.map(sanitizeChatThread);
 }
 
 function latestAssistantContent(messages: StoredChatMessage[]): string | null {
@@ -2753,6 +3002,41 @@ function latestAssistantContent(messages: StoredChatMessage[]): string | null {
 
 function proactiveGreetingLockKey(threadId: string) {
   return `${proactiveGreetingStoragePrefix}:${threadId}`;
+}
+
+async function compressImageToJpegBase64(file: File): Promise<string> {
+  const image = await loadImage(file);
+  const maxSide = 1024;
+  const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) throw new Error("Canvas is not available");
+
+  canvas.width = width;
+  canvas.height = height;
+  context.drawImage(image, 0, 0, width, height);
+
+  return canvas.toDataURL("image/jpeg", 0.82);
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Image failed to load"));
+    };
+    image.src = url;
+  });
 }
 
 async function readChatStream(
@@ -2853,6 +3137,33 @@ function PanelLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+function SettingsInput({
+  label,
+  value,
+  onChange,
+  type = "text",
+  autoComplete,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+  autoComplete?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs text-ink-faint">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        type={type}
+        autoComplete={autoComplete}
+        className="min-h-10 w-full rounded-xl border border-line bg-paper px-3 text-sm text-ink outline-none transition placeholder:text-ink-faint focus:border-line-strong"
+      />
+    </label>
+  );
+}
+
 function UsageMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-xl bg-mist/70 px-3 py-2.5">
@@ -2893,6 +3204,8 @@ function formatUsageOperation(value: string) {
     holiday_lookup: "节假日",
     timebox_letter: "时光信箱",
   };
+
+  labels.vision_extract = "识图";
 
   return labels[value] ?? value;
 }

@@ -10,11 +10,13 @@ import {
 import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine";
 import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
+import { getRuntimeConfig, type RuntimeConfig } from "@/lib/app-config";
 import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { modelTierSchema } from "@/lib/model-routing";
 import type { RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
 import { summarizeThreadTitle } from "@/lib/thread-title";
+import { extractImageDescription } from "@/lib/vision";
 
 export const runtime = "nodejs";
 
@@ -25,6 +27,7 @@ const chatRequestSchema = z.object({
   memoryEnabled: z.boolean().default(true),
   temperature: z.number().min(0).max(1.2).default(0.72),
   stream: z.boolean().default(false),
+  imageBase64: z.string().max(5_000_000).optional(),
   recentMessages: z
     .array(
       z.object({
@@ -46,8 +49,14 @@ export async function POST(request: Request) {
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
     const isFirstTurn = serverMessages.length === 0;
+    const message = body.stream
+      ? body.message
+      : await buildVisionAugmentedMessage(body.message, body.imageBase64);
+    const displayMessage = buildUserDisplayMessage(body.message, body.imageBase64);
     const input = {
       ...body,
+      message,
+      displayMessage,
       threadId: activeThread.id,
       userId,
       isFirstTurn,
@@ -64,7 +73,7 @@ export async function POST(request: Request) {
 
     const result = await runChatTurn(input);
     const messages = await appendChatMessages(userId, activeThread.id, [
-      { role: "user", content: body.message },
+      { role: "user", content: input.displayMessage },
       { role: "assistant", content: result.reply },
     ]);
     const thread = isFirstTurn
@@ -73,7 +82,7 @@ export async function POST(request: Request) {
           activeThread.id,
           await summarizeThreadTitle({
             userId,
-            userMessage: body.message,
+            userMessage: input.displayMessage,
             assistantReply: result.reply,
           }),
         )
@@ -102,6 +111,7 @@ function createChatStream(
     threadId: string;
     userId: string;
     isFirstTurn: boolean;
+    displayMessage: string;
     recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
   },
   signal: AbortSignal,
@@ -115,8 +125,20 @@ function createChatStream(
       };
 
       try {
-        const prepared = await prepareChatTurn({
+        const turnInput = {
           ...input,
+          message: await buildVisionAugmentedMessage(input.message, input.imageBase64, () => {
+            send({
+              type: "status",
+              status: {
+                type: "vision",
+                label: "\u8bc6\u56fe\u4e2d",
+              },
+            });
+          }),
+        };
+        const prepared = await prepareChatTurn({
+          ...turnInput,
           onRealityStatus: (status: RealityContextStatus) => {
             send({
               type: "status",
@@ -132,11 +154,11 @@ function createChatStream(
         });
 
         for await (const chunk of streamDeepSeek({
-          userId: input.userId,
+          userId: turnInput.userId,
           operation: "chat",
           model: prepared.routed.model,
           messages: prepared.promptMessages,
-          temperature: input.temperature,
+          temperature: turnInput.temperature,
           signal,
         })) {
           if (chunk.type === "reasoning") {
@@ -154,27 +176,27 @@ function createChatStream(
         }
 
         const memories = await finishChatTurn({
-          userId: input.userId,
+          userId: turnInput.userId,
           messageId: prepared.messageId,
-          message: input.message,
-          memoryEnabled: input.memoryEnabled,
+          message: turnInput.message,
+          memoryEnabled: turnInput.memoryEnabled,
           memories: prepared.memories,
         });
-        const messages = await appendChatMessages(input.userId, input.threadId, [
-          { role: "user", content: input.message },
+        const messages = await appendChatMessages(turnInput.userId, turnInput.threadId, [
+          { role: "user", content: turnInput.displayMessage },
           { role: "assistant", content: reply.trim() || "我在。你可以慢慢说。" },
         ]);
-        const activeThread = input.isFirstTurn
+        const activeThread = turnInput.isFirstTurn
           ? await updateChatThreadTitle(
-              input.userId,
-              input.threadId,
+              turnInput.userId,
+              turnInput.threadId,
               await summarizeThreadTitle({
-                userId: input.userId,
-                userMessage: input.message,
+                userId: turnInput.userId,
+                userMessage: turnInput.displayMessage,
                 assistantReply: reply,
               }),
             )
-          : await ensureActiveChatThread(input.userId, input.threadId);
+          : await ensureActiveChatThread(turnInput.userId, turnInput.threadId);
 
         send({
           type: "done",
@@ -182,7 +204,7 @@ function createChatStream(
           memories,
           usedMemories: prepared.memories,
           activeThread,
-          threads: await listChatThreads(input.userId),
+          threads: await listChatThreads(turnInput.userId),
           messages,
         });
       } catch (error) {
@@ -203,4 +225,47 @@ function createChatStream(
       "Cache-Control": "no-cache, no-transform",
     },
   });
+}
+
+async function buildVisionAugmentedMessage(
+  message: string,
+  imageBase64?: string,
+  onVisionStart?: () => void,
+) {
+  const trimmedImage = imageBase64?.trim();
+  if (!trimmedImage) return message;
+
+  const config = await getRuntimeConfig();
+  if (!isVisionConfigured(config)) return message;
+
+  try {
+    onVisionStart?.();
+    const description = await extractImageDescription(trimmedImage, config);
+    const userText = message.trim() || "\uff08\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587\uff09";
+
+    return [
+      "[User uploaded an image. Vision description:]",
+      description,
+      "",
+      "[User caption]",
+      userText,
+    ].join("\n");
+  } catch {
+    return message;
+  }
+}
+
+function buildUserDisplayMessage(message: string, imageBase64?: string) {
+  if (!imageBase64?.trim()) return message;
+
+  const userText = message.trim() || "\u8bf7\u770b\u770b\u8fd9\u5f20\u56fe\u7247\u3002";
+  return `\u3010\u56fe\u7247\u3011${userText}`;
+}
+
+function isVisionConfigured(config: RuntimeConfig) {
+  return Boolean(
+    config.visionApiKey.trim() &&
+      config.visionBaseUrl.trim() &&
+      config.visionModelName.trim(),
+  );
 }

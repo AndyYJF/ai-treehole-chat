@@ -14,6 +14,9 @@ export type RuntimeConfig = {
   siliconFlowRerankModel: string;
   tavilyApiKey: string;
   braveSearchApiKey: string;
+  visionApiKey: string;
+  visionBaseUrl: string;
+  visionModelName: string;
   realityCountryCode: string;
 };
 
@@ -28,7 +31,16 @@ export type SetupConfigInput = {
   siliconFlowRerankModel: string;
   tavilyApiKey?: string;
   braveSearchApiKey?: string;
+  visionApiKey?: string;
+  visionBaseUrl?: string;
+  visionModelName?: string;
   realityCountryCode?: string;
+};
+
+export type VisionConfigInput = {
+  visionApiKey?: string;
+  visionBaseUrl?: string;
+  visionModelName?: string;
 };
 
 const configKeys = [
@@ -43,6 +55,9 @@ const configKeys = [
   "siliconFlowRerankModel",
   "tavilyApiKey",
   "braveSearchApiKey",
+  "visionApiKey",
+  "visionBaseUrl",
+  "visionModelName",
   "realityCountryCode",
 ] as const;
 
@@ -75,6 +90,12 @@ export async function getRuntimeConfig(): Promise<RuntimeConfig> {
       "Qwen/Qwen3-Reranker-0.6B",
     tavilyApiKey: process.env.TAVILY_API_KEY ?? stored.tavilyApiKey ?? "",
     braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY ?? stored.braveSearchApiKey ?? "",
+    visionApiKey: process.env.VISION_API_KEY ?? stored.visionApiKey ?? "",
+    visionBaseUrl:
+      process.env.VISION_BASE_URL ??
+      stored.visionBaseUrl ??
+      "https://generativelanguage.googleapis.com/v1beta/openai/",
+    visionModelName: process.env.VISION_MODEL_NAME ?? stored.visionModelName ?? "gemini-3.1-pro-preview",
     realityCountryCode: process.env.REALITY_COUNTRY_CODE ?? stored.realityCountryCode ?? "CN",
   };
 }
@@ -96,6 +117,10 @@ export async function saveSetupConfig(input: SetupConfigInput) {
     siliconFlowRerankModel: input.siliconFlowRerankModel.trim() || "Qwen/Qwen3-Reranker-0.6B",
     tavilyApiKey: input.tavilyApiKey?.trim() ?? "",
     braveSearchApiKey: input.braveSearchApiKey?.trim() ?? "",
+    visionApiKey: input.visionApiKey?.trim() ?? "",
+    visionBaseUrl:
+      input.visionBaseUrl?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
+    visionModelName: input.visionModelName?.trim() || "gemini-3.1-pro-preview",
     realityCountryCode: input.realityCountryCode?.trim().toUpperCase() || "CN",
   };
 
@@ -117,6 +142,38 @@ export async function saveSetupConfig(input: SetupConfigInput) {
       on conflict (key)
       do update set value = excluded.value, updated_at = now()`,
       [key, values[key]],
+    );
+  }
+
+  return getRuntimeConfig();
+}
+
+export async function updateVisionConfig(input: VisionConfigInput) {
+  const values: Pick<Record<ConfigKey, string>, "visionApiKey" | "visionBaseUrl" | "visionModelName"> = {
+    visionApiKey: input.visionApiKey?.trim() ?? "",
+    visionBaseUrl:
+      input.visionBaseUrl?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
+    visionModelName: input.visionModelName?.trim() || "gemini-3.1-pro-preview",
+  };
+
+  const pool = getPostgresPool();
+
+  if (!pool) {
+    for (const [key, value] of Object.entries(values) as Array<[keyof typeof values, string]>) {
+      inMemoryConfig.set(key, value);
+    }
+    return getRuntimeConfig();
+  }
+
+  await ensureConfigSchema();
+
+  for (const [key, value] of Object.entries(values)) {
+    await pool.query(
+      `insert into app_config (key, value, updated_at)
+      values ($1, $2, now())
+      on conflict (key)
+      do update set value = excluded.value, updated_at = now()`,
+      [key, value],
     );
   }
 
