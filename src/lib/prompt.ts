@@ -32,6 +32,14 @@ const BASE_SYSTEM_PROMPT = `
 - 不评判用户的选择和生活方式。
 `.trim();
 
+const INTERNAL_METADATA_POLICY = [
+  "Internal metadata policy:",
+  "- Message timestamps, memory metadata, and reality-context timestamps are private context for reasoning only.",
+  "- Do not quote, expose, or mention raw timestamps, ISO strings, metadata labels, or internal markers to the user.",
+  "- Use time metadata only to understand sequence and recency.",
+  "- If the user explicitly asks about date/time, answer naturally without exposing internal marker syntax.",
+].join("\n");
+
 export function buildChatMessages(input: {
   memories: MemoryRecord[];
   relevantMemories?: MemoryRecord[];
@@ -50,6 +58,8 @@ export function buildChatMessages(input: {
       role: "system" as const,
       content: [
         BASE_SYSTEM_PROMPT,
+        "",
+        INTERNAL_METADATA_POLICY,
         "",
         "【长期记忆】",
         memoryBlock,
@@ -84,9 +94,7 @@ function formatMemoryBlock(memories: MemoryRecord[]): string {
     .slice(0, 12)
     .map((memory) => {
       const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
-      return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
-        memory.createdAt,
-      )}] ${memory.content}`;
+      return `- ${formatMemoryMetadata(memory, confirmed)} ${memory.content}`;
     })
     .join("\n");
 }
@@ -98,16 +106,34 @@ function formatRelevantMemoryBlock(memories: MemoryRecord[]): string {
     .slice(0, 8)
     .map((memory) => {
       const confirmed = memory.userConfirmed ? "confirmed" : "unconfirmed";
-      return `- [${memory.type}/${confirmed}/importance:${memory.importance}/created:${formatContextTime(
-        memory.createdAt,
-      )}] ${memory.content}`;
+      return `- ${formatMemoryMetadata(memory, confirmed)} ${memory.content}`;
     })
     .join("\n");
 }
 
+function formatMemoryMetadata(memory: MemoryRecord, confirmed: string): string {
+  return [
+    `<internal_memory_metadata`,
+    `type="${escapeMetadataAttribute(memory.type)}"`,
+    `confirmed="${escapeMetadataAttribute(confirmed)}"`,
+    `importance="${memory.importance}"`,
+    `created_utc8="${escapeMetadataAttribute(formatContextTime(memory.createdAt))}"`,
+    `visibility="private_do_not_mention"`,
+    `/>`,
+  ].join(" ");
+}
+
 function withTimestamp(content: string, createdAt: string | undefined): string {
   const timestamp = createdAt ? formatContextTime(createdAt) : "unknown";
-  return `[时间：${timestamp}]\n${content}`;
+  return `<internal_message_metadata time_utc8="${escapeMetadataAttribute(timestamp)}" visibility="private_do_not_mention" />\n${content}`;
+}
+
+function escapeMetadataAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function formatContextTime(value: string | null | undefined): string {
