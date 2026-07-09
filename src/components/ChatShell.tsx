@@ -185,6 +185,7 @@ const storageKey = "treehole-chat-state-v1";
 const tabStateStorageKey = "treehole-chat-tab-state-v1";
 const clientRecoveryStorageKey = "treehole-chat-client-recovery-v1";
 const peerSyncStorageKey = "treehole-chat-peer-sync-v1";
+const authSyncStorageKey = "treehole-chat-auth-sync-v1";
 const peerSyncChannelName = "treehole-chat-sync";
 const proactiveGreetingStoragePrefix = "treehole-proactive-greeting-v1";
 const proactiveGreetingThresholdMs = 8 * 60 * 60 * 1000;
@@ -201,6 +202,12 @@ function createClientId() {
 
 function tierLabel(value: ModelTier) {
   return tierOptions.find((option) => option.value === value)?.label ?? "自动";
+}
+
+function redirectToLogin() {
+  if (window.location.pathname !== "/login") {
+    window.location.href = "/login";
+  }
 }
 
 const initialMessages: Message[] = [
@@ -334,6 +341,7 @@ export function ChatShell() {
       void (async () => {
         try {
           const response = await fetch("/api/letters/sync", { method: "POST" });
+          if (handleAuthRedirect(response)) return;
 
           if (response.status !== 204 && response.ok) {
             const data = (await response.json()) as { letters: TimeboxLetter[] };
@@ -346,6 +354,7 @@ export function ChatShell() {
 
         try {
           const response = await fetch("/api/letters");
+          if (handleAuthRedirect(response)) return;
           if (!response.ok) return;
 
           const data = (await response.json()) as { letters: TimeboxLetter[] };
@@ -355,6 +364,8 @@ export function ChatShell() {
         }
       })();
     });
+    // Initial restore intentionally runs once; later foreground events keep state fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -443,7 +454,13 @@ export function ChatShell() {
       typeof BroadcastChannel === "function" ? new BroadcastChannel(peerSyncChannelName) : null;
     peerSyncChannelRef.current = peerChannel;
     if (peerChannel) {
-      peerChannel.onmessage = () => {
+      peerChannel.onmessage = (event) => {
+        const payload = event.data as { type?: string } | null;
+        if (payload?.type === "auth-state-changed") {
+          redirectToLogin();
+          return;
+        }
+
         void syncForegroundState(true);
       };
     }
@@ -455,6 +472,11 @@ export function ChatShell() {
 
       if (event.key === peerSyncStorageKey) {
         void syncForegroundState(true);
+        return;
+      }
+
+      if (event.key === authSyncStorageKey) {
+        redirectToLogin();
         return;
       }
 
@@ -483,6 +505,8 @@ export function ChatShell() {
         syncForegroundStateRef.current = async () => {};
       }
     };
+    // Event listeners use ref-backed dynamic state and are rebound only when startup finishes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
   useEffect(() => {
@@ -606,6 +630,27 @@ export function ChatShell() {
     window.localStorage.setItem(peerSyncStorageKey, JSON.stringify(payload));
   }
 
+  function notifyAuthTabs(reason: string) {
+    const payload = { type: "auth-state-changed", reason, at: Date.now() };
+    peerSyncChannelRef.current?.postMessage(payload);
+    window.localStorage.setItem(authSyncStorageKey, JSON.stringify(payload));
+  }
+
+  function handleAuthRedirect(response: Response) {
+    if (response.status === 401) {
+      notifyAuthTabs("unauthorized");
+      redirectToLogin();
+      return true;
+    }
+
+    if (response.status === 428) {
+      window.location.href = "/setup";
+      return true;
+    }
+
+    return false;
+  }
+
   function applySharedLocalState(raw: string | null) {
     if (!raw) return;
 
@@ -644,6 +689,7 @@ export function ChatShell() {
 
   async function refreshMemories() {
     const response = await fetch("/api/memories");
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as {
@@ -660,6 +706,7 @@ export function ChatShell() {
     threadRefreshSeqRef.current = refreshSeq;
     const query = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
     const response = await fetch(`/api/threads${query}`);
+    if (handleAuthRedirect(response)) return false;
     if (!response.ok) return false;
 
     const data = (await response.json()) as {
@@ -685,6 +732,7 @@ export function ChatShell() {
 
   async function refreshUsage() {
     const response = await fetch("/api/usage");
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as UsagePayload;
@@ -694,6 +742,7 @@ export function ChatShell() {
 
   async function refreshVisionSettings() {
     const response = await fetch("/api/setup");
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as {
@@ -726,6 +775,7 @@ export function ChatShell() {
         body: JSON.stringify(visionSettings),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (!response.ok) throw new Error("save failed");
 
       const data = (await response.json()) as { defaults?: Partial<VisionSettings> };
@@ -747,6 +797,7 @@ export function ChatShell() {
 
   async function refreshLetters() {
     const response = await fetch("/api/letters");
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as { letters: TimeboxLetter[] };
@@ -772,6 +823,7 @@ export function ChatShell() {
       body: JSON.stringify({ id: letterId }),
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as { letters: TimeboxLetter[] };
@@ -786,6 +838,7 @@ export function ChatShell() {
       body: JSON.stringify({ action: "delete", memoryId }),
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
     const data = (await response.json()) as { memories: MemoryRecord[] };
     setMemories(data.memories);
@@ -807,6 +860,7 @@ export function ChatShell() {
       }),
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       showNotice("记忆没有保存成功。");
       return;
@@ -826,6 +880,7 @@ export function ChatShell() {
     if (!window.confirm("清空所有记忆？")) return;
 
     const response = await fetch("/api/memories", { method: "DELETE" });
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as {
@@ -850,6 +905,7 @@ export function ChatShell() {
         body: JSON.stringify({ action: "maintain" }),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (!response.ok) throw new Error("maintain failed");
 
       const data = (await response.json()) as {
@@ -914,6 +970,7 @@ export function ChatShell() {
         }),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (!response.ok) {
         const data = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(data?.error ?? "导入分析失败");
@@ -968,6 +1025,7 @@ export function ChatShell() {
         }),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (!response.ok) {
         const data = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(data?.error ?? "记忆没有添加成功");
@@ -1001,6 +1059,7 @@ export function ChatShell() {
 
   async function exportData() {
     const response = await fetch("/api/export");
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = await response.json();
@@ -1019,6 +1078,7 @@ export function ChatShell() {
     if (!window.confirm("清空用量记录？")) return;
 
     const response = await fetch("/api/usage", { method: "DELETE" });
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as UsagePayload;
@@ -1031,6 +1091,7 @@ export function ChatShell() {
     if (!window.confirm("清空对话、记忆和用量记录？这个操作不能撤销。")) return;
 
     const response = await fetch("/api/data", { method: "DELETE" });
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
     const data = (await response.json()) as {
@@ -1060,8 +1121,12 @@ export function ChatShell() {
   }
 
   async function logout() {
-    await fetch("/api/session", { method: "DELETE" });
-    window.location.href = "/login";
+    try {
+      await fetch("/api/session", { method: "DELETE" });
+    } finally {
+      notifyAuthTabs("logout");
+      redirectToLogin();
+    }
   }
 
   async function setMemoryEnabled(enabled: boolean) {
@@ -1073,6 +1138,7 @@ export function ChatShell() {
       body: JSON.stringify({ action: "setEnabled", enabled }),
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
     const data = (await response.json()) as {
       memories: MemoryRecord[];
@@ -1100,6 +1166,7 @@ export function ChatShell() {
       body: JSON.stringify({}),
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       showNotice("没有建好，再试一次。");
       return;
@@ -1137,6 +1204,7 @@ export function ChatShell() {
       method: "DELETE",
     });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       showNotice("没有删掉，再试一次。");
       return;
@@ -1190,6 +1258,7 @@ export function ChatShell() {
     const query = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
     const response = await fetch(`/api/messages${query}`, { method: "DELETE" });
 
+    if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       showNotice("没有清掉，再试一次。");
       void refreshThreadState(threadId);
@@ -1265,6 +1334,7 @@ export function ChatShell() {
         body: JSON.stringify({}),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (response.status === 204) {
         setMessages((current) => {
           const next = current.filter((message) => message.id !== assistantMessage.id);
@@ -1446,6 +1516,7 @@ export function ChatShell() {
         }),
       });
 
+      if (handleAuthRedirect(response)) return;
       if (!response.ok) throw new Error("request failed");
 
       await readChatStream(response, {
