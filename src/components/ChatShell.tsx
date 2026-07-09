@@ -238,6 +238,12 @@ function createPeerSyncChannel(): BroadcastChannel | null {
   }
 }
 
+function runBackgroundTask(task: Promise<unknown>) {
+  void task.catch(() => {
+    // Background sync is opportunistic; foreground/online events will retry.
+  });
+}
+
 function createClientId() {
   if (typeof globalThis.crypto?.randomUUID === "function") {
     return globalThis.crypto.randomUUID();
@@ -371,19 +377,19 @@ export function ChatShell() {
           setRouteLabel(restoredTier === "auto" ? (tabState.routeLabel ?? "自动") : tierLabel(restoredTier));
           if (typeof parsed.memoryEnabled === "boolean") setMemoryEnabledState(parsed.memoryEnabled);
           if (typeof parsed.temperature === "number") setTemperature(parsed.temperature);
-          void refreshThreadStateRef.current(tabState.activeThreadId);
+          runBackgroundTask(refreshThreadStateRef.current(tabState.activeThreadId));
         } catch {
           safeRemoveStorageItem("local", storageKey);
-          void refreshThreadStateRef.current();
+          runBackgroundTask(refreshThreadStateRef.current());
         }
       } else {
-        void refreshThreadStateRef.current();
+        runBackgroundTask(refreshThreadStateRef.current());
       }
 
       setLoaded(true);
-      void refreshMemories();
-      void refreshUsage();
-      void refreshVisionSettings();
+      runBackgroundTask(refreshMemories());
+      runBackgroundTask(refreshUsage());
+      runBackgroundTask(refreshVisionSettings());
       void (async () => {
         try {
           const response = await fetch("/api/letters/sync", { method: "POST" });
@@ -854,7 +860,7 @@ export function ChatShell() {
 
   async function openLetterDrawer() {
     setIsLetterDrawerOpen(true);
-    void refreshLetters();
+    runBackgroundTask(refreshLetters());
   }
 
   async function selectLetter(letterId: string) {
@@ -1307,7 +1313,7 @@ export function ChatShell() {
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       showNotice("没有清掉，再试一次。");
-      void refreshThreadState(threadId);
+      runBackgroundTask(refreshThreadState(threadId));
       return;
     }
 
@@ -1430,7 +1436,7 @@ export function ChatShell() {
             ),
           );
           notifyPeerTabs("proactive-greeting");
-          void refreshUsage();
+          runBackgroundTask(refreshUsage());
         },
       });
     } catch {
@@ -1605,7 +1611,7 @@ export function ChatShell() {
             ),
           );
           notifyPeerTabs("chat-message");
-          void refreshUsage();
+          runBackgroundTask(refreshUsage());
         },
       });
     } catch {
@@ -1675,7 +1681,7 @@ export function ChatShell() {
               label="时间线"
               onClick={() => {
                 setTimelineOpen(true);
-                void refreshThreadState(activeThread?.id);
+                runBackgroundTask(refreshThreadState(activeThread?.id));
               }}
             >
               <PenLine size={17} strokeWidth={1.8} />
@@ -1684,7 +1690,7 @@ export function ChatShell() {
               label="记忆"
               onClick={() => {
                 setMemoryOpen(true);
-                void refreshMemories();
+                runBackgroundTask(refreshMemories());
               }}
             >
               <Brain size={17} strokeWidth={1.8} />
@@ -1693,7 +1699,7 @@ export function ChatShell() {
               label="设置"
               onClick={() => {
                 setSettingsOpen(true);
-                void refreshUsage();
+                runBackgroundTask(refreshUsage());
               }}
             >
               <Settings size={17} strokeWidth={1.8} />
