@@ -308,13 +308,17 @@ async function recoverUnsyncedClientMessages(
 
   const serverTail = serverMessages.map((message) => ({
     role: message.role,
-    content: message.content,
+    content: normalizeClientVisibleMessage(message.role, message.content),
+  }));
+  const clientTail = clientRecentMessages.map((message) => ({
+    role: message.role,
+    content: normalizeClientVisibleMessage(message.role, message.content),
   }));
   let overlap = 0;
 
-  for (let size = Math.min(serverTail.length, clientRecentMessages.length); size >= 0; size -= 1) {
+  for (let size = Math.min(serverTail.length, clientTail.length); size >= 0; size -= 1) {
     const serverSlice = serverTail.slice(serverTail.length - size);
-    const clientSlice = clientRecentMessages.slice(0, size);
+    const clientSlice = clientTail.slice(0, size);
     const matches = serverSlice.every(
       (message, index) =>
         message.role === clientSlice[index]?.role && message.content === clientSlice[index]?.content,
@@ -326,7 +330,7 @@ async function recoverUnsyncedClientMessages(
     }
   }
 
-  const missing = clientRecentMessages
+  const missing = clientTail
     .slice(overlap)
     .filter((message) => {
       if (message.role === "assistant" && message.content.trim() === CLIENT_NETWORK_FALLBACK) {
@@ -336,7 +340,7 @@ async function recoverUnsyncedClientMessages(
     })
     .map((message) => ({
       role: message.role,
-      content: stripInternalMetadata(message.content) || message.content,
+      content: message.content,
     }));
 
   if (missing.length === 0) {
@@ -349,4 +353,29 @@ async function recoverUnsyncedClientMessages(
 
   const persisted = await appendChatMessages(userId, threadId, missing);
   return persisted.slice(-missing.length);
+}
+
+function normalizeClientVisibleMessage(role: "user" | "assistant", content: string) {
+  const stripped = stripInternalMetadata(content) || content.trim();
+  return role === "user" ? sanitizeVisionDisplayContent(stripped) : stripped;
+}
+
+function sanitizeVisionDisplayContent(content: string) {
+  const looksLikeVisionContext =
+    content.startsWith("[User uploaded an image.") ||
+    content.includes("[\u7528\u6237\u4e0a\u4f20\u4e86\u4e00\u5f20\u56fe\u7247") ||
+    (content.startsWith("[") && content.includes("\n\n[") && content.length > 120);
+
+  if (!looksLikeVisionContext) return content;
+
+  const captionMarker = content.match(/\n\n\[[^\]\n]+\]\n/);
+  const caption = captionMarker
+    ? content.slice((captionMarker.index ?? 0) + captionMarker[0].length).trim()
+    : "";
+  const displayCaption =
+    caption && !caption.includes("\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587")
+      ? caption
+      : "\u8bf7\u770b\u770b\u8fd9\u5f20\u56fe\u7247\u3002";
+
+  return `\u3010\u56fe\u7247\u3011${displayCaption}`;
 }

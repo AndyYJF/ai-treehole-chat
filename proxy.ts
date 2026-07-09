@@ -1,16 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAccessGateEnabled, isValidSession, SESSION_COOKIE_NAME } from "@/lib/auth";
+import { SESSION_COOKIE_NAME } from "@/lib/auth";
+import {
+  isRuntimeAccessGateEnabled,
+  isValidRuntimeSession,
+} from "@/lib/auth-runtime";
 
 const PUBLIC_PREFIXES = ["/_next", "/api/session", "/api/setup"];
 const PUBLIC_PATHS = new Set(["/login", "/setup", "/favicon.ico"]);
 
-export async function middleware(request: NextRequest) {
-  if (!isAccessGateEnabled()) return NextResponse.next();
+export async function proxy(request: NextRequest) {
+  if (!(await isRuntimeAccessGateEnabled())) return NextResponse.next();
 
   const { pathname } = request.nextUrl;
   if (isPublicPath(pathname)) return NextResponse.next();
 
-  const authenticated = await isValidSession(request.cookies.get(SESSION_COOKIE_NAME)?.value);
+  const authenticated = await isValidRuntimeSession(
+    request.cookies.get(SESSION_COOKIE_NAME)?.value,
+  );
   if (authenticated) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
