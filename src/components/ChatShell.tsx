@@ -192,6 +192,52 @@ const proactiveGreetingThresholdMs = 8 * 60 * 60 * 1000;
 const clientRecoveryTtlMs = 24 * 60 * 60 * 1000;
 const networkFallbackMessage = "刚刚连接不太顺。你说的我先接住，我们可以再试一次。";
 
+type BrowserStorageKind = "local" | "session";
+
+function getBrowserStorage(kind: BrowserStorageKind): Storage | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    return kind === "local" ? window.localStorage : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function safeGetStorageItem(kind: BrowserStorageKind, key: string): string | null {
+  try {
+    return getBrowserStorage(kind)?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function safeSetStorageItem(kind: BrowserStorageKind, key: string, value: string) {
+  try {
+    getBrowserStorage(kind)?.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in private browsing, embedded webviews, or quota exhaustion.
+  }
+}
+
+function safeRemoveStorageItem(kind: BrowserStorageKind, key: string) {
+  try {
+    getBrowserStorage(kind)?.removeItem(key);
+  } catch {
+    // Best-effort cleanup; server state remains authoritative.
+  }
+}
+
+function createPeerSyncChannel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel !== "function") return null;
+
+  try {
+    return new BroadcastChannel(peerSyncChannelName);
+  } catch {
+    return null;
+  }
+}
+
 function createClientId() {
   if (typeof globalThis.crypto?.randomUUID === "function") {
     return globalThis.crypto.randomUUID();
@@ -315,7 +361,7 @@ export function ChatShell() {
     queueMicrotask(() => {
       clientRecoveryRef.current = readClientRecoveryState();
 
-      const raw = window.localStorage.getItem(storageKey);
+      const raw = safeGetStorageItem("local", storageKey);
       if (raw) {
         try {
           const parsed = JSON.parse(raw) as Partial<LegacyLocalState>;
@@ -327,7 +373,7 @@ export function ChatShell() {
           if (typeof parsed.temperature === "number") setTemperature(parsed.temperature);
           void refreshThreadStateRef.current(tabState.activeThreadId);
         } catch {
-          window.localStorage.removeItem(storageKey);
+          safeRemoveStorageItem("local", storageKey);
           void refreshThreadStateRef.current();
         }
       } else {
@@ -377,13 +423,14 @@ export function ChatShell() {
       temperature,
     };
 
-    window.localStorage.setItem(storageKey, JSON.stringify(state));
+    safeSetStorageItem("local", storageKey, JSON.stringify(state));
   }, [loaded, memoryEnabled, temperature, tier]);
 
   useEffect(() => {
     if (!loaded) return;
 
-    window.sessionStorage.setItem(
+    safeSetStorageItem(
+      "session",
       tabStateStorageKey,
       JSON.stringify({ activeThreadId: activeThread?.id, routeLabel } satisfies TabState),
     );
@@ -450,8 +497,7 @@ export function ChatShell() {
     window.addEventListener("pageshow", handleForegroundEvent);
     window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    const peerChannel =
-      typeof BroadcastChannel === "function" ? new BroadcastChannel(peerSyncChannelName) : null;
+    const peerChannel = createPeerSyncChannel();
     peerSyncChannelRef.current = peerChannel;
     if (peerChannel) {
       peerChannel.onmessage = (event) => {
@@ -616,24 +662,24 @@ export function ChatShell() {
 
   function saveClientRecoveryState(recovery: ClientRecoveryState) {
     clientRecoveryRef.current = recovery;
-    window.localStorage.setItem(clientRecoveryStorageKey, JSON.stringify(recovery));
+    safeSetStorageItem("local", clientRecoveryStorageKey, JSON.stringify(recovery));
   }
 
   function clearClientRecoveryState() {
     clientRecoveryRef.current = null;
-    window.localStorage.removeItem(clientRecoveryStorageKey);
+    safeRemoveStorageItem("local", clientRecoveryStorageKey);
   }
 
   function notifyPeerTabs(reason: string) {
     const payload = { type: "server-state-changed", reason, at: Date.now() };
     peerSyncChannelRef.current?.postMessage(payload);
-    window.localStorage.setItem(peerSyncStorageKey, JSON.stringify(payload));
+    safeSetStorageItem("local", peerSyncStorageKey, JSON.stringify(payload));
   }
 
   function notifyAuthTabs(reason: string) {
     const payload = { type: "auth-state-changed", reason, at: Date.now() };
     peerSyncChannelRef.current?.postMessage(payload);
-    window.localStorage.setItem(authSyncStorageKey, JSON.stringify(payload));
+    safeSetStorageItem("local", authSyncStorageKey, JSON.stringify(payload));
   }
 
   function handleAuthRedirect(response: Response) {
@@ -1102,8 +1148,8 @@ export function ChatShell() {
       usage: UsageSummary;
     };
 
-    window.localStorage.removeItem(storageKey);
-    window.sessionStorage.removeItem(tabStateStorageKey);
+    safeRemoveStorageItem("local", storageKey);
+    safeRemoveStorageItem("session", tabStateStorageKey);
     clearClientRecoveryState();
     invalidateThreadRefreshes();
     setActiveThread(sanitizeChatThread(data.activeThread));
@@ -1284,7 +1330,7 @@ export function ChatShell() {
 
   function shouldTriggerProactiveGreeting(thread: ChatThread) {
     const lockKey = proactiveGreetingLockKey(thread.id);
-    const lockedAt = Number(window.localStorage.getItem(lockKey) ?? 0);
+    const lockedAt = Number(safeGetStorageItem("local", lockKey) ?? 0);
 
     if (lockedAt && Date.now() - lockedAt < proactiveGreetingThresholdMs) return false;
     if (!thread.lastMessageAt) return true;
@@ -1322,7 +1368,7 @@ export function ChatShell() {
       };
 
       greetingInFlightRef.current = true;
-      window.localStorage.setItem(lockKey, String(Date.now()));
+      safeSetStorageItem("local", lockKey, String(Date.now()));
       setMessages((current) => [...current.filter((message) => message.id !== "hello"), assistantMessage]);
       setIsThinking(true);
       setChatStatus("准备关心");
@@ -1388,7 +1434,7 @@ export function ChatShell() {
         },
       });
     } catch {
-      window.localStorage.removeItem(lockKey);
+      safeRemoveStorageItem("local", lockKey);
       setMessages((current) => {
         const next = current.filter((message) => message.content.trim().length > 0 || message.id === "hello");
         return next.length > 0 ? next : initialMessages;
@@ -3375,7 +3421,7 @@ function sanitizeChatThreads(threads: ChatThread[]): ChatThread[] {
 }
 
 function readTabState(legacyActiveThreadId?: string, legacyRouteLabel?: string): TabState {
-  const raw = window.sessionStorage.getItem(tabStateStorageKey);
+  const raw = safeGetStorageItem("session", tabStateStorageKey);
 
   if (raw) {
     try {
@@ -3385,7 +3431,7 @@ function readTabState(legacyActiveThreadId?: string, legacyRouteLabel?: string):
         routeLabel: typeof parsed.routeLabel === "string" ? parsed.routeLabel : undefined,
       };
     } catch {
-      window.sessionStorage.removeItem(tabStateStorageKey);
+      safeRemoveStorageItem("session", tabStateStorageKey);
     }
   }
 
@@ -3394,7 +3440,7 @@ function readTabState(legacyActiveThreadId?: string, legacyRouteLabel?: string):
       activeThreadId: legacyActiveThreadId,
       routeLabel: legacyRouteLabel,
     };
-    window.sessionStorage.setItem(tabStateStorageKey, JSON.stringify(migrated));
+    safeSetStorageItem("session", tabStateStorageKey, JSON.stringify(migrated));
     return migrated;
   }
 
@@ -3402,7 +3448,7 @@ function readTabState(legacyActiveThreadId?: string, legacyRouteLabel?: string):
 }
 
 function readClientRecoveryState(): ClientRecoveryState | null {
-  const raw = window.localStorage.getItem(clientRecoveryStorageKey);
+  const raw = safeGetStorageItem("local", clientRecoveryStorageKey);
   if (!raw) return null;
 
   try {
@@ -3422,13 +3468,13 @@ function readClientRecoveryState(): ClientRecoveryState | null {
     };
 
     if (!isClientRecoveryActive(recovery, recovery.threadId)) {
-      window.localStorage.removeItem(clientRecoveryStorageKey);
+      safeRemoveStorageItem("local", clientRecoveryStorageKey);
       return null;
     }
 
     return recovery;
   } catch {
-    window.localStorage.removeItem(clientRecoveryStorageKey);
+    safeRemoveStorageItem("local", clientRecoveryStorageKey);
     return null;
   }
 }
