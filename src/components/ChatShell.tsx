@@ -161,15 +161,35 @@ type VisionSettings = {
 
 type LocalState = {
   tier: ModelTier;
-  routeLabel: string;
   memoryEnabled: boolean;
   temperature: number;
+};
+
+type LegacyLocalState = LocalState & {
   activeThreadId?: string;
+  routeLabel?: string;
+};
+
+type TabState = {
+  activeThreadId?: string;
+  routeLabel?: string;
+};
+
+type ClientRecoveryState = {
+  threadId?: string;
+  createdAt: number;
+  messages: Array<Pick<Message, "role" | "content">>;
 };
 
 const storageKey = "treehole-chat-state-v1";
+const tabStateStorageKey = "treehole-chat-tab-state-v1";
+const clientRecoveryStorageKey = "treehole-chat-client-recovery-v1";
+const peerSyncStorageKey = "treehole-chat-peer-sync-v1";
+const peerSyncChannelName = "treehole-chat-sync";
 const proactiveGreetingStoragePrefix = "treehole-proactive-greeting-v1";
 const proactiveGreetingThresholdMs = 8 * 60 * 60 * 1000;
+const clientRecoveryTtlMs = 24 * 60 * 60 * 1000;
+const networkFallbackMessage = "刚刚连接不太顺。你说的我先接住，我们可以再试一次。";
 
 function createClientId() {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -271,31 +291,38 @@ export function ChatShell() {
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const greetingAttemptedRef = useRef(false);
   const greetingInFlightRef = useRef(false);
+  const activeThreadIdRef = useRef<string | undefined>(undefined);
+  const isThinkingRef = useRef(false);
+  const lastForegroundSyncRef = useRef(0);
+  const threadRefreshSeqRef = useRef(0);
+  const clientRecoveryRef = useRef<ClientRecoveryState | null>(null);
+  const peerSyncChannelRef = useRef<BroadcastChannel | null>(null);
+  const refreshThreadStateRef = useRef<(threadId?: string) => Promise<boolean>>(async () => false);
+  const refreshLettersRef = useRef<() => Promise<void>>(async () => {});
   const triggerProactiveGreetingRef = useRef<(threadId: string) => Promise<void>>(async () => {});
   const { preference, setPreference } = useThemePreference();
 
   useEffect(() => {
     queueMicrotask(() => {
+      clientRecoveryRef.current = readClientRecoveryState();
+
       const raw = window.localStorage.getItem(storageKey);
       if (raw) {
         try {
-          const parsed = JSON.parse(raw) as Partial<LocalState>;
+          const parsed = JSON.parse(raw) as Partial<LegacyLocalState>;
           const restoredTier = parsed.tier ?? "auto";
+          const tabState = readTabState(parsed.activeThreadId, parsed.routeLabel);
           setTier(restoredTier);
-          setRouteLabel(restoredTier === "auto" ? (parsed.routeLabel ?? "自动") : tierLabel(restoredTier));
+          setRouteLabel(restoredTier === "auto" ? (tabState.routeLabel ?? "自动") : tierLabel(restoredTier));
           if (typeof parsed.memoryEnabled === "boolean") setMemoryEnabledState(parsed.memoryEnabled);
           if (typeof parsed.temperature === "number") setTemperature(parsed.temperature);
-          if (parsed.activeThreadId) {
-            void refreshThreadState(parsed.activeThreadId);
-          } else {
-            void refreshThreadState();
-          }
+          void refreshThreadStateRef.current(tabState.activeThreadId);
         } catch {
           window.localStorage.removeItem(storageKey);
-          void refreshThreadState();
+          void refreshThreadStateRef.current();
         }
       } else {
-        void refreshThreadState();
+        void refreshThreadStateRef.current();
       }
 
       setLoaded(true);
@@ -315,11 +342,15 @@ export function ChatShell() {
           // Letter generation is intentionally quiet and should not affect chat startup.
         }
 
-        const response = await fetch("/api/letters");
-        if (!response.ok) return;
+        try {
+          const response = await fetch("/api/letters");
+          if (!response.ok) return;
 
-        const data = (await response.json()) as { letters: TimeboxLetter[] };
-        setLetters(data.letters);
+          const data = (await response.json()) as { letters: TimeboxLetter[] };
+          setLetters(data.letters);
+        } catch {
+          // Startup remains usable offline; foreground sync retries later.
+        }
       })();
     });
   }, []);
@@ -329,14 +360,114 @@ export function ChatShell() {
 
     const state: LocalState = {
       tier,
-      routeLabel,
       memoryEnabled,
       temperature,
-      activeThreadId: activeThread?.id,
     };
 
     window.localStorage.setItem(storageKey, JSON.stringify(state));
-  }, [activeThread?.id, loaded, memoryEnabled, routeLabel, temperature, tier]);
+  }, [loaded, memoryEnabled, temperature, tier]);
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    window.sessionStorage.setItem(
+      tabStateStorageKey,
+      JSON.stringify({ activeThreadId: activeThread?.id, routeLabel } satisfies TabState),
+    );
+  }, [activeThread?.id, loaded, routeLabel]);
+
+  useEffect(() => {
+    activeThreadIdRef.current = activeThread?.id;
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    isThinkingRef.current = isThinking;
+  }, [isThinking]);
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    async function syncForegroundState(force = false) {
+      if (document.visibilityState === "hidden" || isThinkingRef.current) return;
+      if (!force && typeof navigator !== "undefined" && navigator.onLine === false) return;
+
+      const now = Date.now();
+      if (!force && now - lastForegroundSyncRef.current < 12_000) return;
+      lastForegroundSyncRef.current = now;
+
+      try {
+        await refreshThreadStateRef.current(activeThreadIdRef.current);
+        await Promise.allSettled([
+          refreshMemories(),
+          refreshUsage(),
+          refreshLettersRef.current(),
+          refreshVisionSettings(),
+        ]);
+      } catch {
+        // Foreground sync is opportunistic; the next focus/online/interval event will retry.
+      }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void syncForegroundState();
+      }
+    }
+
+    function handleForegroundEvent() {
+      void syncForegroundState();
+    }
+
+    function handleOnline() {
+      void syncForegroundState(true);
+    }
+
+    window.addEventListener("focus", handleForegroundEvent);
+    window.addEventListener("pageshow", handleForegroundEvent);
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const peerChannel =
+      typeof BroadcastChannel === "function" ? new BroadcastChannel(peerSyncChannelName) : null;
+    peerSyncChannelRef.current = peerChannel;
+    if (peerChannel) {
+      peerChannel.onmessage = () => {
+        void syncForegroundState(true);
+      };
+    }
+    function handleStorageEvent(event: StorageEvent) {
+      if (event.key === storageKey) {
+        applySharedLocalState(event.newValue);
+        return;
+      }
+
+      if (event.key === peerSyncStorageKey) {
+        void syncForegroundState(true);
+        return;
+      }
+
+      if (event.key === clientRecoveryStorageKey) {
+        clientRecoveryRef.current = readClientRecoveryState();
+        void syncForegroundState(true);
+      }
+    }
+    window.addEventListener("storage", handleStorageEvent);
+    const syncInterval = window.setInterval(() => {
+      void syncForegroundState();
+    }, 45_000);
+
+    return () => {
+      window.removeEventListener("focus", handleForegroundEvent);
+      window.removeEventListener("pageshow", handleForegroundEvent);
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("storage", handleStorageEvent);
+      window.clearInterval(syncInterval);
+      peerChannel?.close();
+      if (peerSyncChannelRef.current === peerChannel) {
+        peerSyncChannelRef.current = null;
+      }
+    };
+  }, [loaded]);
 
   useEffect(() => {
     if (!loaded || !activeThread?.id || isThinking || greetingAttemptedRef.current) return;
@@ -400,6 +531,84 @@ export function ChatShell() {
     }, 2200);
   }
 
+  function applyClientRecoveryMessages(baseMessages: Message[], threadId?: string): Message[] {
+    const recovery = clientRecoveryRef.current;
+    if (!recovery) return baseMessages;
+
+    if (!isClientRecoveryActive(recovery, threadId)) {
+      if (!recovery.threadId || isClientRecoveryExpired(recovery)) {
+        clearClientRecoveryState();
+      }
+      return baseMessages;
+    }
+
+    const visibleMessages = baseMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+    const alreadySynced = recovery.messages.every((message) =>
+      visibleMessages.some(
+        (visible) => visible.role === message.role && visible.content === message.content,
+      ),
+    );
+
+    if (alreadySynced) {
+      clearClientRecoveryState();
+      return baseMessages;
+    }
+
+    const withoutDuplicateFallback = baseMessages.filter(
+      (message) => message.content !== networkFallbackMessage,
+    );
+    return [
+      ...withoutDuplicateFallback.filter((message) =>
+        !recovery.messages.some(
+          (recovered) => recovered.role === message.role && recovered.content === message.content,
+        ),
+      ),
+      ...recovery.messages.map((message) => ({
+        id: createClientId(),
+        role: message.role,
+        content: message.content,
+      })),
+    ];
+  }
+
+  function saveClientRecoveryState(recovery: ClientRecoveryState) {
+    clientRecoveryRef.current = recovery;
+    window.localStorage.setItem(clientRecoveryStorageKey, JSON.stringify(recovery));
+  }
+
+  function clearClientRecoveryState() {
+    clientRecoveryRef.current = null;
+    window.localStorage.removeItem(clientRecoveryStorageKey);
+  }
+
+  function notifyPeerTabs(reason: string) {
+    const payload = { type: "server-state-changed", reason, at: Date.now() };
+    peerSyncChannelRef.current?.postMessage(payload);
+    window.localStorage.setItem(peerSyncStorageKey, JSON.stringify(payload));
+  }
+
+  function applySharedLocalState(raw: string | null) {
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<LocalState>;
+      const nextTier = parsed.tier ?? "auto";
+      setTier(nextTier);
+      if (typeof parsed.memoryEnabled === "boolean") setMemoryEnabledState(parsed.memoryEnabled);
+      if (typeof parsed.temperature === "number") setTemperature(parsed.temperature);
+      setRouteLabel((current) => (nextTier === "auto" ? current : tierLabel(nextTier)));
+    } catch {
+      // Ignore malformed state from older clients; the next local write will repair it.
+    }
+  }
+
+  function invalidateThreadRefreshes() {
+    threadRefreshSeqRef.current += 1;
+  }
+
   function startThinkingTimer() {
     stopThinkingTimer();
     const startedAt = Date.now();
@@ -430,21 +639,33 @@ export function ChatShell() {
     setMemoryEnabledState(data.settings.enabled);
   }
 
-  async function refreshThreadState(threadId?: string) {
+  async function refreshThreadState(threadId?: string): Promise<boolean> {
+    const refreshSeq = threadRefreshSeqRef.current + 1;
+    threadRefreshSeqRef.current = refreshSeq;
     const query = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
     const response = await fetch(`/api/threads${query}`);
-    if (!response.ok) return;
+    if (!response.ok) return false;
 
     const data = (await response.json()) as {
       activeThread: ChatThread;
       threads: ChatThread[];
       messages: StoredChatMessage[];
     };
+    const nextActiveThread = sanitizeChatThread(data.activeThread);
+
+    if (refreshSeq !== threadRefreshSeqRef.current) return false;
+
+    if (threadId && nextActiveThread.id !== threadId) {
+      clearClientRecoveryState();
+    }
 
     setThreads(sanitizeChatThreads(data.threads));
-    setActiveThread(sanitizeChatThread(data.activeThread));
-    setMessages(toDisplayMessages(data.messages));
+    setActiveThread(nextActiveThread);
+    setMessages(applyClientRecoveryMessages(toDisplayMessages(data.messages), nextActiveThread.id));
+    return true;
   }
+
+  refreshThreadStateRef.current = refreshThreadState;
 
   async function refreshUsage() {
     const response = await fetch("/api/usage");
@@ -499,6 +720,7 @@ export function ChatShell() {
           visionModelName: data.defaults?.visionModelName ?? current.visionModelName,
         }));
       }
+      notifyPeerTabs("vision-settings");
       showNotice("Vision 配置已保存。");
     } catch {
       showNotice("Vision 配置没有保存成功。");
@@ -514,6 +736,8 @@ export function ChatShell() {
     const data = (await response.json()) as { letters: TimeboxLetter[] };
     setLetters(data.letters);
   }
+
+  refreshLettersRef.current = refreshLetters;
 
   async function openLetterDrawer() {
     setIsLetterDrawerOpen(true);
@@ -536,6 +760,7 @@ export function ChatShell() {
 
     const data = (await response.json()) as { letters: TimeboxLetter[] };
     setLetters(data.letters);
+    notifyPeerTabs("letter-read");
   }
 
   async function deleteMemory(memoryId: string) {
@@ -549,6 +774,7 @@ export function ChatShell() {
     const data = (await response.json()) as { memories: MemoryRecord[] };
     setMemories(data.memories);
     setSelectedMemoryId((current) => (current === memoryId ? null : current));
+    notifyPeerTabs("memory-delete");
   }
 
   async function updateMemory(
@@ -576,6 +802,7 @@ export function ChatShell() {
     };
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    notifyPeerTabs("memory-update");
     showNotice("记忆已更新。");
   }
 
@@ -592,6 +819,7 @@ export function ChatShell() {
 
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    notifyPeerTabs("memory-clear");
   }
 
   async function maintainMemoriesNow() {
@@ -615,6 +843,7 @@ export function ChatShell() {
 
       setMemories(data.memories);
       setMemoryEnabledState(data.settings.enabled);
+      notifyPeerTabs("memory-maintain");
       showNotice("记忆已维护。");
     } catch {
       showNotice("记忆维护没有完成，再试一次。");
@@ -737,6 +966,7 @@ export function ChatShell() {
       setMemoryEnabledState(data.settings.enabled);
       setMemoryImportOpen(false);
       resetMemoryImport();
+      notifyPeerTabs("memory-import");
       showNotice(`已添加 ${selected.length} 条记忆。`);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "记忆没有添加成功");
@@ -778,6 +1008,7 @@ export function ChatShell() {
     const data = (await response.json()) as UsagePayload;
     setUsage(data.summary);
     setRecentUsage(data.recent ?? []);
+    notifyPeerTabs("usage-clear");
   }
 
   async function clearAllData() {
@@ -795,6 +1026,9 @@ export function ChatShell() {
     };
 
     window.localStorage.removeItem(storageKey);
+    window.sessionStorage.removeItem(tabStateStorageKey);
+    clearClientRecoveryState();
+    invalidateThreadRefreshes();
     setActiveThread(sanitizeChatThread(data.activeThread));
     setThreads(sanitizeChatThreads(data.threads));
     setMessages(initialMessages);
@@ -806,6 +1040,7 @@ export function ChatShell() {
     setRouteLabel("自动");
     setTemperature(0.72);
     setInput("");
+    notifyPeerTabs("data-clear");
   }
 
   async function logout() {
@@ -829,6 +1064,7 @@ export function ChatShell() {
     };
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    notifyPeerTabs("memory-enabled");
   }
 
   async function createNewThread() {
@@ -859,12 +1095,15 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
+    clearClientRecoveryState();
+    invalidateThreadRefreshes();
     setActiveThread(sanitizeChatThread(data.activeThread));
     setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setRouteLabel("自动");
     setInput("");
     setTimelineOpen(false);
+    notifyPeerTabs("thread-create");
     showNotice("已开启新时间线。");
   }
 
@@ -893,11 +1132,14 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
+    clearClientRecoveryState();
+    invalidateThreadRefreshes();
     setActiveThread(sanitizeChatThread(data.activeThread));
     setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setTimelineOpen(false);
     setRouteLabel("自动");
+    notifyPeerTabs("thread-delete");
     showNotice("已删除时间线。");
   }
 
@@ -907,8 +1149,10 @@ export function ChatShell() {
       return;
     }
 
-    await refreshThreadState(threadId);
-    setTimelineOpen(false);
+    if (await refreshThreadState(threadId)) {
+      clearClientRecoveryState();
+      setTimelineOpen(false);
+    }
   }
 
   async function clearCurrentContext() {
@@ -942,11 +1186,14 @@ export function ChatShell() {
       messages: StoredChatMessage[];
     };
 
+    clearClientRecoveryState();
+    invalidateThreadRefreshes();
     setActiveThread(sanitizeChatThread(data.activeThread));
     setThreads(sanitizeChatThreads(data.threads));
     setMessages(toDisplayMessages(data.messages));
     setRouteLabel("自动");
     setInput("");
+    notifyPeerTabs("messages-clear");
     showNotice("已清空当前上下文。");
   }
 
@@ -1030,6 +1277,7 @@ export function ChatShell() {
           );
         },
         onDone: (data) => {
+          invalidateThreadRefreshes();
           setRouteLabel(data.routed.label);
           setActiveThread(sanitizeChatThread(data.activeThread));
           setThreads(sanitizeChatThreads(data.threads));
@@ -1049,6 +1297,7 @@ export function ChatShell() {
                 : message,
             ),
           );
+          notifyPeerTabs("proactive-greeting");
           void refreshUsage();
         },
       });
@@ -1134,6 +1383,10 @@ export function ChatShell() {
     event.preventDefault();
     const textContent = input.trim();
     if ((!textContent && !selectedImage) || isThinking) return;
+    if (!activeThread?.id) {
+      showNotice("时间线还在同步，稍等一下。");
+      return;
+    }
 
     const content = textContent || "请看看这张图片。";
     const imageBase64 = selectedImage?.base64;
@@ -1197,6 +1450,8 @@ export function ChatShell() {
           );
         },
         onDone: (data) => {
+          clearClientRecoveryState();
+          invalidateThreadRefreshes();
           setRouteLabel(data.routed.label);
           setActiveThread(sanitizeChatThread(data.activeThread));
           setThreads(sanitizeChatThreads(data.threads));
@@ -1216,18 +1471,26 @@ export function ChatShell() {
                 : message,
             ),
           );
+          notifyPeerTabs("chat-message");
           void refreshUsage();
         },
       });
     } catch {
-      setMessages((current) => [
-        ...current.filter((message) => message.id !== assistantMessage.id),
-        {
-          id: createClientId(),
-          role: "assistant",
-          content: "刚刚连接不太顺。你说的我先接住，我们可以再试一次。",
-        },
-      ]);
+      const recoveryMessages: ClientRecoveryState["messages"] = [
+        { role: "user", content: userMessage.content },
+        { role: "assistant", content: networkFallbackMessage },
+      ];
+      saveClientRecoveryState({
+        threadId: activeThread.id,
+        createdAt: Date.now(),
+        messages: recoveryMessages,
+      });
+      setMessages((current) =>
+        applyClientRecoveryMessages(
+          current.filter((message) => message.id !== assistantMessage.id),
+          activeThread?.id,
+        ),
+      );
     } finally {
       stopThinkingTimer();
       setIsThinking(false);
@@ -3022,6 +3285,75 @@ function sanitizeChatThread(thread: ChatThread): ChatThread {
 
 function sanitizeChatThreads(threads: ChatThread[]): ChatThread[] {
   return threads.map(sanitizeChatThread);
+}
+
+function readTabState(legacyActiveThreadId?: string, legacyRouteLabel?: string): TabState {
+  const raw = window.sessionStorage.getItem(tabStateStorageKey);
+
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<TabState>;
+      return {
+        activeThreadId: typeof parsed.activeThreadId === "string" ? parsed.activeThreadId : undefined,
+        routeLabel: typeof parsed.routeLabel === "string" ? parsed.routeLabel : undefined,
+      };
+    } catch {
+      window.sessionStorage.removeItem(tabStateStorageKey);
+    }
+  }
+
+  if (legacyActiveThreadId || legacyRouteLabel) {
+    const migrated = {
+      activeThreadId: legacyActiveThreadId,
+      routeLabel: legacyRouteLabel,
+    };
+    window.sessionStorage.setItem(tabStateStorageKey, JSON.stringify(migrated));
+    return migrated;
+  }
+
+  return {};
+}
+
+function readClientRecoveryState(): ClientRecoveryState | null {
+  const raw = window.localStorage.getItem(clientRecoveryStorageKey);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ClientRecoveryState>;
+    const messages = Array.isArray(parsed.messages)
+      ? parsed.messages.filter(
+          (message): message is Pick<Message, "role" | "content"> =>
+            (message?.role === "user" || message?.role === "assistant") &&
+            typeof message.content === "string" &&
+            message.content.trim().length > 0,
+        )
+      : [];
+    const recovery: ClientRecoveryState = {
+      threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined,
+      createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : 0,
+      messages,
+    };
+
+    if (!isClientRecoveryActive(recovery, recovery.threadId)) {
+      window.localStorage.removeItem(clientRecoveryStorageKey);
+      return null;
+    }
+
+    return recovery;
+  } catch {
+    window.localStorage.removeItem(clientRecoveryStorageKey);
+    return null;
+  }
+}
+
+function isClientRecoveryActive(recovery: ClientRecoveryState | null, threadId?: string): boolean {
+  if (!recovery || recovery.messages.length === 0) return false;
+  if (isClientRecoveryExpired(recovery)) return false;
+  return Boolean(recovery.threadId && threadId && recovery.threadId === threadId);
+}
+
+function isClientRecoveryExpired(recovery: ClientRecoveryState) {
+  return Date.now() - recovery.createdAt > clientRecoveryTtlMs;
 }
 
 function latestAssistantContent(messages: StoredChatMessage[]): string | null {

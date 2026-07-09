@@ -21,6 +21,10 @@ import { extractImageDescription } from "@/lib/vision";
 
 export const runtime = "nodejs";
 
+const maxRecentClientMessages = 12;
+const maxRecoveredClientMessages = 2;
+const maxClientMessageContentLength = 8000;
+
 const chatRequestSchema = z.object({
   threadId: z.string().optional(),
   message: z.string().min(1).max(8000),
@@ -33,9 +37,10 @@ const chatRequestSchema = z.object({
     .array(
       z.object({
         role: z.enum(["user", "assistant"]),
-        content: z.string(),
+        content: z.string().max(maxClientMessageContentLength),
       }),
     )
+    .max(maxRecentClientMessages)
     .default([]),
 });
 
@@ -310,9 +315,12 @@ async function recoverUnsyncedClientMessages(
     role: message.role,
     content: normalizeClientVisibleMessage(message.role, message.content),
   }));
-  const clientTail = clientRecentMessages.map((message) => ({
+  const clientTail = clientRecentMessages.slice(-maxRecentClientMessages).map((message) => ({
     role: message.role,
-    content: normalizeClientVisibleMessage(message.role, message.content),
+    content: normalizeClientVisibleMessage(message.role, message.content).slice(
+      0,
+      maxClientMessageContentLength,
+    ),
   }));
   let overlap = 0;
 
@@ -338,6 +346,7 @@ async function recoverUnsyncedClientMessages(
       }
       return message.content.trim().length > 0;
     })
+    .slice(-maxRecoveredClientMessages)
     .map((message) => ({
       role: message.role,
       content: message.content,
