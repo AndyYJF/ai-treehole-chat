@@ -13,6 +13,7 @@ import { requireApiSession } from "@/lib/auth-runtime";
 import { getRuntimeConfig, type RuntimeConfig } from "@/lib/app-config";
 import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { modelTierSchema } from "@/lib/model-routing";
+import { stripInternalMetadata } from "@/lib/prompt";
 import type { RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
 import { summarizeThreadTitle } from "@/lib/thread-title";
@@ -48,7 +49,15 @@ export async function POST(request: Request) {
     void maybeMaintainMemories({ userId });
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
-    const isFirstTurn = serverMessages.length === 0;
+    // Recover turns that reached the UI but never finished persisting (e.g. network drop).
+    const recoveredMessages = await recoverUnsyncedClientMessages(
+      userId,
+      activeThread.id,
+      serverMessages,
+      body.recentMessages,
+    );
+    const historyMessages = [...serverMessages, ...recoveredMessages];
+    const isFirstTurn = historyMessages.length === 0;
     const message = body.stream
       ? body.message
       : await buildVisionAugmentedMessage(body.message, body.imageBase64);
@@ -60,7 +69,7 @@ export async function POST(request: Request) {
       threadId: activeThread.id,
       userId,
       isFirstTurn,
-      recentMessages: serverMessages.slice(-12).map((message) => ({
+      recentMessages: historyMessages.slice(-12).map((message) => ({
         role: message.role,
         content: message.content,
         createdAt: message.createdAt,
@@ -71,10 +80,15 @@ export async function POST(request: Request) {
       return createChatStream(input, request.signal);
     }
 
-    const result = await runChatTurn(input);
-    const messages = await appendChatMessages(userId, activeThread.id, [
+    // Persist the user turn first so a later failure still keeps it in context.
+    await appendChatMessages(userId, activeThread.id, [
       { role: "user", content: input.displayMessage },
-      { role: "assistant", content: result.reply },
+    ]);
+
+    const result = await runChatTurn(input);
+    const assistantReply = stripInternalMetadata(result.reply) || "我在。你可以慢慢说。";
+    const messages = await appendChatMessages(userId, activeThread.id, [
+      { role: "assistant", content: assistantReply },
     ]);
     const thread = isFirstTurn
       ? await updateChatThreadTitle(
@@ -83,13 +97,14 @@ export async function POST(request: Request) {
           await summarizeThreadTitle({
             userId,
             userMessage: input.displayMessage,
-            assistantReply: result.reply,
+            assistantReply,
           }),
         )
       : await ensureActiveChatThread(userId, activeThread.id);
 
     return NextResponse.json({
       ...result,
+      reply: assistantReply,
       activeThread: thread,
       threads: await listChatThreads(userId),
       messages,
@@ -137,6 +152,12 @@ function createChatStream(
             });
           }),
         };
+        // Persist the user message before model work so network/model failures
+        // still leave this turn in the next request's server-side context.
+        await appendChatMessages(turnInput.userId, turnInput.threadId, [
+          { role: "user", content: turnInput.displayMessage },
+        ]);
+
         const prepared = await prepareChatTurn({
           ...turnInput,
           onRealityStatus: (status: RealityContextStatus) => {
@@ -175,6 +196,7 @@ function createChatStream(
           });
         }
 
+        const assistantReply = stripInternalMetadata(reply) || "我在。你可以慢慢说。";
         const memories = await finishChatTurn({
           userId: turnInput.userId,
           messageId: prepared.messageId,
@@ -183,8 +205,7 @@ function createChatStream(
           memories: prepared.memories,
         });
         const messages = await appendChatMessages(turnInput.userId, turnInput.threadId, [
-          { role: "user", content: turnInput.displayMessage },
-          { role: "assistant", content: reply.trim() || "我在。你可以慢慢说。" },
+          { role: "assistant", content: assistantReply },
         ]);
         const activeThread = turnInput.isFirstTurn
           ? await updateChatThreadTitle(
@@ -193,7 +214,7 @@ function createChatStream(
               await summarizeThreadTitle({
                 userId: turnInput.userId,
                 userMessage: turnInput.displayMessage,
-                assistantReply: reply,
+                assistantReply,
               }),
             )
           : await ensureActiveChatThread(turnInput.userId, turnInput.threadId);
@@ -268,4 +289,64 @@ function isVisionConfigured(config: RuntimeConfig) {
       config.visionBaseUrl.trim() &&
       config.visionModelName.trim(),
   );
+}
+
+const CLIENT_NETWORK_FALLBACK =
+  "刚刚连接不太顺。你说的我先接住，我们可以再试一次。";
+
+async function recoverUnsyncedClientMessages(
+  userId: string,
+  threadId: string,
+  serverMessages: Array<{ role: "user" | "assistant"; content: string; createdAt: string }>,
+  clientRecentMessages: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  if (clientRecentMessages.length === 0) return [] as Array<{
+    role: "user" | "assistant";
+    content: string;
+    createdAt: string;
+  }>;
+
+  const serverTail = serverMessages.map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+  let overlap = 0;
+
+  for (let size = Math.min(serverTail.length, clientRecentMessages.length); size >= 0; size -= 1) {
+    const serverSlice = serverTail.slice(serverTail.length - size);
+    const clientSlice = clientRecentMessages.slice(0, size);
+    const matches = serverSlice.every(
+      (message, index) =>
+        message.role === clientSlice[index]?.role && message.content === clientSlice[index]?.content,
+    );
+
+    if (matches) {
+      overlap = size;
+      break;
+    }
+  }
+
+  const missing = clientRecentMessages
+    .slice(overlap)
+    .filter((message) => {
+      if (message.role === "assistant" && message.content.trim() === CLIENT_NETWORK_FALLBACK) {
+        return false;
+      }
+      return message.content.trim().length > 0;
+    })
+    .map((message) => ({
+      role: message.role,
+      content: stripInternalMetadata(message.content) || message.content,
+    }));
+
+  if (missing.length === 0) {
+    return [] as Array<{
+      role: "user" | "assistant";
+      content: string;
+      createdAt: string;
+    }>;
+  }
+
+  const persisted = await appendChatMessages(userId, threadId, missing);
+  return persisted.slice(-missing.length);
 }

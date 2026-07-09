@@ -343,10 +343,17 @@ export function ChatShell() {
 
     greetingAttemptedRef.current = true;
 
-    if (!shouldTriggerProactiveGreeting(activeThread)) return;
+    const latestThread =
+      [...threads].sort((left, right) => {
+        const leftTime = left.lastMessageAt ?? left.updatedAt;
+        const rightTime = right.lastMessageAt ?? right.updatedAt;
+        return rightTime.localeCompare(leftTime);
+      })[0] ?? activeThread;
 
-    void triggerProactiveGreetingRef.current(activeThread.id);
-  }, [activeThread, isThinking, loaded]);
+    if (!shouldTriggerProactiveGreeting(latestThread)) return;
+
+    void triggerProactiveGreetingRef.current(latestThread.id);
+  }, [activeThread, isThinking, loaded, threads]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -959,25 +966,40 @@ export function ChatShell() {
   async function triggerProactiveGreeting(threadId: string) {
     if (greetingInFlightRef.current) return;
 
-    const assistantMessage: Message = {
-      id: createClientId(),
-      role: "assistant",
-      content: "",
-    };
-    const lockKey = proactiveGreetingLockKey(threadId);
-
-    greetingInFlightRef.current = true;
-    window.localStorage.setItem(lockKey, String(Date.now()));
-    setMessages((current) => [...current.filter((message) => message.id !== "hello"), assistantMessage]);
-    setIsThinking(true);
-    setChatStatus("准备关心");
-    startThinkingTimer();
+    // Prefer the newest timeline for proactive care, even if the client is
+    // currently viewing an older thread.
+    const latestThread =
+      [...threads].sort((left, right) => {
+        const leftTime = left.lastMessageAt ?? left.updatedAt;
+        const rightTime = right.lastMessageAt ?? right.updatedAt;
+        return rightTime.localeCompare(leftTime);
+      })[0] ?? null;
+    const targetThreadId = latestThread?.id ?? threadId;
+    const lockKey = proactiveGreetingLockKey(targetThreadId);
 
     try {
+      if (latestThread && latestThread.id !== activeThread?.id) {
+        setActiveThread(sanitizeChatThread(latestThread));
+        await refreshThreadState(latestThread.id);
+      }
+
+      const assistantMessage: Message = {
+        id: createClientId(),
+        role: "assistant",
+        content: "",
+      };
+
+      greetingInFlightRef.current = true;
+      window.localStorage.setItem(lockKey, String(Date.now()));
+      setMessages((current) => [...current.filter((message) => message.id !== "hello"), assistantMessage]);
+      setIsThinking(true);
+      setChatStatus("准备关心");
+      startThinkingTimer();
+
       const response = await fetch("/api/chat/greet", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ threadId }),
+        body: JSON.stringify({}),
       });
 
       if (response.status === 204) {
@@ -1017,10 +1039,11 @@ export function ChatShell() {
               message.id === assistantMessage.id
                 ? {
                     ...message,
-                    content:
+                    content: stripInternalMetadataFromContent(
                       message.content.trim().length > 0
                         ? message.content
                         : latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
+                    ),
                     usedMemories: data.usedMemories ?? [],
                   }
                 : message,
@@ -1032,7 +1055,7 @@ export function ChatShell() {
     } catch {
       window.localStorage.removeItem(lockKey);
       setMessages((current) => {
-        const next = current.filter((message) => message.id !== assistantMessage.id);
+        const next = current.filter((message) => message.content.trim().length > 0 || message.id === "hello");
         return next.length > 0 ? next : initialMessages;
       });
     } finally {
@@ -1180,15 +1203,14 @@ export function ChatShell() {
           setMemories(data.memories);
           setMessages((current) =>
             current.map((message) =>
-              message.id === assistantMessage.id && message.content.trim().length === 0
+              message.id === assistantMessage.id
                 ? {
                     ...message,
-                    content: latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
-                    usedMemories: data.usedMemories ?? [],
-                  }
-                : message.id === assistantMessage.id
-                  ? {
-                    ...message,
+                    content: stripInternalMetadataFromContent(
+                      message.content.trim().length > 0
+                        ? message.content
+                        : latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
+                    ),
                     usedMemories: data.usedMemories ?? [],
                   }
                 : message,
@@ -2954,8 +2976,19 @@ function toDisplayMessages(messages: StoredChatMessage[]): Message[] {
   return messages.map((message) => ({
     id: message.id,
     role: message.role,
-    content: message.role === "user" ? sanitizeVisionDisplayContent(message.content) : message.content,
+    content:
+      message.role === "user"
+        ? sanitizeVisionDisplayContent(message.content)
+        : stripInternalMetadataFromContent(message.content),
   }));
+}
+
+function stripInternalMetadataFromContent(content: string): string {
+  return content
+    .replace(/<\/?internal_(?:message|memory)_metadata\b[^>]*\/?>/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function sanitizeVisionDisplayContent(content: string) {

@@ -11,6 +11,7 @@ import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import type { MemoryRecord } from "@/lib/memory/types";
+import { stripInternalMetadata } from "@/lib/prompt";
 import { buildRealityContext, type RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
 
@@ -29,9 +30,13 @@ export async function POST(request: Request) {
   if (unauthorized) return unauthorized;
 
   try {
-    const body = greetingRequestSchema.parse(await request.json().catch(() => ({})));
+    // Ignore client threadId: proactive care always writes to the newest timeline.
+    greetingRequestSchema.parse(await request.json().catch(() => ({})));
     const userId = getServerUserId();
-    const activeThread = await ensureActiveChatThread(userId, body.threadId);
+    // Proactive care must always land on the newest timeline, not whichever
+    // thread the client currently has open.
+    const threads = await listChatThreads(userId);
+    const latestThread = threads[0] ?? (await ensureActiveChatThread(userId));
     const lockKey = userId;
     const now = Date.now();
     const existingLock = greetingLocks.get(lockKey);
@@ -40,7 +45,7 @@ export async function POST(request: Request) {
       return new Response(null, { status: 204 });
     }
 
-    const serverMessages = await listChatMessages(userId, activeThread.id, 24);
+    const serverMessages = await listChatMessages(userId, latestThread.id, 24);
     const globalRecentMessages = await listRecentChatMessages(userId, 24);
     const lastMessage = globalRecentMessages.at(-1);
     const lastUserMessage = [...globalRecentMessages].reverse().find((message) => message.role === "user") ?? null;
@@ -60,7 +65,7 @@ export async function POST(request: Request) {
     return createGreetingStream(
       {
         userId,
-        threadId: activeThread.id,
+        threadId: latestThread.id,
         recentMessages: serverMessages,
       },
       request.signal,
@@ -148,7 +153,7 @@ function createGreetingStream(
         const messages = await appendChatMessages(input.userId, input.threadId, [
           {
             role: "assistant",
-            content: reply.trim() || "我在。你可以慢慢说。",
+            content: stripInternalMetadata(reply) || "我在。你可以慢慢说。",
           },
         ]);
 
@@ -240,7 +245,8 @@ function formatRecentHistory(messages: Array<{ role: "user" | "assistant"; conte
     .slice(-6)
     .map((message) => {
       const role = message.role === "user" ? "用户" : "助手";
-      return `- [${formatTimestamp(message.createdAt)}] ${role}：${message.content.slice(0, 220)}`;
+      const content = stripInternalMetadata(message.content) || message.content;
+      return `- [${formatTimestamp(message.createdAt)}] ${role}：${content.slice(0, 220)}`;
     })
     .join("\n");
 }

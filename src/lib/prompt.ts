@@ -35,10 +35,14 @@ const BASE_SYSTEM_PROMPT = `
 const INTERNAL_METADATA_POLICY = [
   "Internal metadata policy:",
   "- Message timestamps, memory metadata, and reality-context timestamps are private context for reasoning only.",
+  "- Never copy, quote, paraphrase, or re-emit any XML-like internal tags such as <internal_message_metadata ... /> or <internal_memory_metadata ... />.",
   "- Do not quote, expose, or mention raw timestamps, ISO strings, metadata labels, or internal markers to the user.",
   "- Use time metadata only to understand sequence and recency.",
   "- If the user explicitly asks about date/time, answer naturally without exposing internal marker syntax.",
 ].join("\n");
+
+const INTERNAL_METADATA_TAG_RE =
+  /<\/?internal_(?:message|memory)_metadata\b[^>]*\/?>/gi;
 
 export function buildChatMessages(input: {
   memories: MemoryRecord[];
@@ -70,7 +74,7 @@ export function buildChatMessages(input: {
     },
     ...input.recentMessages.map((message) => ({
       role: message.role,
-      content: withTimestamp(message.content, message.createdAt),
+      content: withTimestamp(stripInternalMetadata(message.content) || message.content, message.createdAt),
     })),
     {
       role: "user" as const,
@@ -81,7 +85,10 @@ export function buildChatMessages(input: {
         "【本轮相关记忆】",
         formatRelevantMemoryBlock(input.relevantMemories ?? []),
         "",
-        withTimestamp(input.latestMessage, latestMessageCreatedAt),
+        withTimestamp(
+          stripInternalMetadata(input.latestMessage) || input.latestMessage,
+          latestMessageCreatedAt,
+        ),
       ].join("\n"),
     },
   ];
@@ -121,6 +128,14 @@ function formatMemoryMetadata(memory: MemoryRecord, confirmed: string): string {
     `visibility="private_do_not_mention"`,
     `/>`,
   ].join(" ");
+}
+
+export function stripInternalMetadata(content: string): string {
+  return content
+    .replace(INTERNAL_METADATA_TAG_RE, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function withTimestamp(content: string, createdAt: string | undefined): string {
