@@ -623,6 +623,19 @@ export function ChatShell() {
     }, 2200);
   }
 
+  async function fetchForAction(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+    failureMessage: string,
+  ) {
+    try {
+      return await fetch(input, init);
+    } catch {
+      showNotice(failureMessage);
+      return null;
+    }
+  }
+
   function applyClientRecoveryMessages(baseMessages: Message[], threadId?: string): Message[] {
     const recovery = clientRecoveryRef.current;
     if (!recovery) return baseMessages;
@@ -869,11 +882,16 @@ export function ChatShell() {
     const target = letters.find((letter) => letter.id === letterId);
     if (!target || target.isRead) return;
 
-    const response = await fetch("/api/letters", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: letterId }),
-    });
+    const response = await fetchForAction(
+      "/api/letters",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: letterId }),
+      },
+      "信件状态没有同步成功。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
@@ -884,11 +902,16 @@ export function ChatShell() {
   }
 
   async function deleteMemory(memoryId: string) {
-    const response = await fetch("/api/memories", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "delete", memoryId }),
-    });
+    const response = await fetchForAction(
+      "/api/memories",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", memoryId }),
+      },
+      "记忆没有删除成功。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
@@ -902,15 +925,20 @@ export function ChatShell() {
     memoryId: string,
     update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
   ) {
-    const response = await fetch("/api/memories", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "update",
-        memoryId,
-        ...update,
-      }),
-    });
+    const response = await fetchForAction(
+      "/api/memories",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update",
+          memoryId,
+          ...update,
+        }),
+      },
+      "记忆没有保存成功。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
@@ -931,7 +959,12 @@ export function ChatShell() {
   async function clearAllMemories() {
     if (!window.confirm("清空所有记忆？")) return;
 
-    const response = await fetch("/api/memories", { method: "DELETE" });
+    const response = await fetchForAction(
+      "/api/memories",
+      { method: "DELETE" },
+      "记忆没有清空成功。",
+    );
+    if (!response) return;
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
@@ -1110,7 +1143,8 @@ export function ChatShell() {
   }
 
   async function exportData() {
-    const response = await fetch("/api/export");
+    const response = await fetchForAction("/api/export", undefined, "导出没有完成。");
+    if (!response) return;
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
@@ -1129,7 +1163,12 @@ export function ChatShell() {
   async function clearUsage() {
     if (!window.confirm("清空用量记录？")) return;
 
-    const response = await fetch("/api/usage", { method: "DELETE" });
+    const response = await fetchForAction(
+      "/api/usage",
+      { method: "DELETE" },
+      "用量记录没有清空成功。",
+    );
+    if (!response) return;
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
@@ -1142,7 +1181,12 @@ export function ChatShell() {
   async function clearAllData() {
     if (!window.confirm("清空对话、记忆和用量记录？这个操作不能撤销。")) return;
 
-    const response = await fetch("/api/data", { method: "DELETE" });
+    const response = await fetchForAction(
+      "/api/data",
+      { method: "DELETE" },
+      "数据没有清空成功。",
+    );
+    if (!response) return;
     if (handleAuthRedirect(response)) return;
     if (!response.ok) return;
 
@@ -1182,16 +1226,28 @@ export function ChatShell() {
   }
 
   async function setMemoryEnabled(enabled: boolean) {
+    const previousEnabled = memoryEnabled;
     setMemoryEnabledState(enabled);
 
-    const response = await fetch("/api/memories", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "setEnabled", enabled }),
-    });
+    const response = await fetchForAction(
+      "/api/memories",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "setEnabled", enabled }),
+      },
+      "记忆开关没有同步成功。",
+    );
+    if (!response) {
+      setMemoryEnabledState(previousEnabled);
+      return;
+    }
 
     if (handleAuthRedirect(response)) return;
-    if (!response.ok) return;
+    if (!response.ok) {
+      setMemoryEnabledState(previousEnabled);
+      return;
+    }
     const data = (await response.json()) as {
       memories: MemoryRecord[];
       settings: { enabled: boolean };
@@ -1212,11 +1268,16 @@ export function ChatShell() {
       return;
     }
 
-    const response = await fetch("/api/threads", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
+    const response = await fetchForAction(
+      "/api/threads",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      "没有建好，再试一次。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
@@ -1252,9 +1313,14 @@ export function ChatShell() {
       return;
     }
 
-    const response = await fetch(`/api/threads?threadId=${encodeURIComponent(threadId)}`, {
-      method: "DELETE",
-    });
+    const response = await fetchForAction(
+      `/api/threads?threadId=${encodeURIComponent(threadId)}`,
+      {
+        method: "DELETE",
+      },
+      "没有删掉，再试一次。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
@@ -1285,9 +1351,13 @@ export function ChatShell() {
       return;
     }
 
-    if (await refreshThreadState(threadId)) {
-      clearClientRecoveryState();
-      setTimelineOpen(false);
+    try {
+      if (await refreshThreadState(threadId)) {
+        clearClientRecoveryState();
+        setTimelineOpen(false);
+      }
+    } catch {
+      showNotice("时间线没有同步成功。");
     }
   }
 
@@ -1308,7 +1378,12 @@ export function ChatShell() {
 
     const threadId = activeThread?.id;
     const query = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
-    const response = await fetch(`/api/messages${query}`, { method: "DELETE" });
+    const response = await fetchForAction(
+      `/api/messages${query}`,
+      { method: "DELETE" },
+      "没有清掉，再试一次。",
+    );
+    if (!response) return;
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
