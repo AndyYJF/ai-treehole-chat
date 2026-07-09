@@ -294,9 +294,11 @@ export function ChatShell() {
   const activeThreadIdRef = useRef<string | undefined>(undefined);
   const isThinkingRef = useRef(false);
   const lastForegroundSyncRef = useRef(0);
+  const pendingForegroundSyncRef = useRef(false);
   const threadRefreshSeqRef = useRef(0);
   const clientRecoveryRef = useRef<ClientRecoveryState | null>(null);
   const peerSyncChannelRef = useRef<BroadcastChannel | null>(null);
+  const syncForegroundStateRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
   const refreshThreadStateRef = useRef<(threadId?: string) => Promise<boolean>>(async () => false);
   const refreshLettersRef = useRef<() => Promise<void>>(async () => {});
   const triggerProactiveGreetingRef = useRef<(threadId: string) => Promise<void>>(async () => {});
@@ -382,18 +384,26 @@ export function ChatShell() {
 
   useEffect(() => {
     isThinkingRef.current = isThinking;
-  }, [isThinking]);
+
+    if (!isThinking && loaded && pendingForegroundSyncRef.current) {
+      void syncForegroundStateRef.current(true);
+    }
+  }, [isThinking, loaded]);
 
   useEffect(() => {
     if (!loaded) return;
 
     async function syncForegroundState(force = false) {
-      if (document.visibilityState === "hidden" || isThinkingRef.current) return;
+      if (document.visibilityState === "hidden" || isThinkingRef.current) {
+        pendingForegroundSyncRef.current = true;
+        return;
+      }
       if (!force && typeof navigator !== "undefined" && navigator.onLine === false) return;
 
       const now = Date.now();
       if (!force && now - lastForegroundSyncRef.current < 12_000) return;
       lastForegroundSyncRef.current = now;
+      pendingForegroundSyncRef.current = false;
 
       try {
         await refreshThreadStateRef.current(activeThreadIdRef.current);
@@ -404,13 +414,16 @@ export function ChatShell() {
           refreshVisionSettings(),
         ]);
       } catch {
+        pendingForegroundSyncRef.current = true;
         // Foreground sync is opportunistic; the next focus/online/interval event will retry.
       }
     }
 
+    syncForegroundStateRef.current = syncForegroundState;
+
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
-        void syncForegroundState();
+        void syncForegroundState(pendingForegroundSyncRef.current);
       }
     }
 
@@ -465,6 +478,9 @@ export function ChatShell() {
       peerChannel?.close();
       if (peerSyncChannelRef.current === peerChannel) {
         peerSyncChannelRef.current = null;
+      }
+      if (syncForegroundStateRef.current === syncForegroundState) {
+        syncForegroundStateRef.current = async () => {};
       }
     };
   }, [loaded]);
