@@ -104,6 +104,7 @@ type ChatStreamEvent =
       threads: ChatThread[];
       memories: MemoryRecord[];
       usedMemories?: MemoryRecord[];
+      assistantMessageId?: string;
       messages: StoredChatMessage[];
     }
   | { type: "error"; error: string };
@@ -1496,19 +1497,14 @@ export function ChatShell() {
           setThreads(sanitizeChatThreads(data.threads));
           setMemories(data.memories);
           setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantMessage.id
-                ? {
-                    ...message,
-                    content: stripInternalMetadataFromContent(
-                      message.content.trim().length > 0
-                        ? message.content
-                        : latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
-                    ),
-                    usedMemories: data.usedMemories ?? [],
-                  }
-                : message,
-            ),
+            mergeStreamedAssistantMessages({
+              serverMessages: data.messages,
+              currentMessages: current,
+              assistantMessageId: assistantMessage.id,
+              serverAssistantMessageId: data.assistantMessageId,
+              fallbackContent: "我在。你可以慢慢说。",
+              usedMemories: data.usedMemories ?? [],
+            }),
           );
           notifyPeerTabs("proactive-greeting");
           runBackgroundTask(refreshUsage());
@@ -1671,19 +1667,14 @@ export function ChatShell() {
           setThreads(sanitizeChatThreads(data.threads));
           setMemories(data.memories);
           setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantMessage.id
-                ? {
-                    ...message,
-                    content: stripInternalMetadataFromContent(
-                      message.content.trim().length > 0
-                        ? message.content
-                        : latestAssistantContent(data.messages) ?? "我在。你可以慢慢说。",
-                    ),
-                    usedMemories: data.usedMemories ?? [],
-                  }
-                : message,
-            ),
+            mergeStreamedAssistantMessages({
+              serverMessages: data.messages,
+              currentMessages: current,
+              assistantMessageId: assistantMessage.id,
+              serverAssistantMessageId: data.assistantMessageId,
+              fallbackContent: "我在。你可以慢慢说。",
+              usedMemories: data.usedMemories ?? [],
+            }),
           );
           notifyPeerTabs("chat-message");
           runBackgroundTask(refreshUsage());
@@ -3458,6 +3449,52 @@ function toDisplayMessages(messages: StoredChatMessage[]): Message[] {
         ? sanitizeVisionDisplayContent(message.content)
         : stripInternalMetadataFromContent(message.content),
   }));
+}
+
+function mergeStreamedAssistantMessages(input: {
+  serverMessages: StoredChatMessage[];
+  currentMessages: Message[];
+  assistantMessageId: string;
+  serverAssistantMessageId?: string;
+  fallbackContent: string;
+  usedMemories: MemoryRecord[];
+}): Message[] {
+  const serverDisplayMessages = toDisplayMessages(input.serverMessages);
+  const streamedAssistant = input.currentMessages.find(
+    (message) => message.id === input.assistantMessageId,
+  );
+  const streamedContent = stripInternalMetadataFromContent(streamedAssistant?.content ?? "");
+  const serverAssistantContent = stripInternalMetadataFromContent(
+    latestAssistantContent(input.serverMessages) ?? "",
+  );
+  const assistantContent =
+    streamedContent || serverAssistantContent || input.fallbackContent;
+  const serverAssistantIndex =
+    input.serverAssistantMessageId != null
+      ? serverDisplayMessages.findIndex((message) => message.id === input.serverAssistantMessageId)
+      : -1;
+
+  if (serverAssistantIndex >= 0) {
+    return serverDisplayMessages.map((message, index) =>
+      index === serverAssistantIndex
+        ? {
+            ...message,
+            content: assistantContent,
+            usedMemories: input.usedMemories,
+          }
+        : message,
+    );
+  }
+
+  return [
+    ...serverDisplayMessages.filter((message) => message.id !== "hello"),
+    {
+      id: input.assistantMessageId,
+      role: "assistant",
+      content: assistantContent,
+      usedMemories: input.usedMemories,
+    },
+  ];
 }
 
 function stripInternalMetadataFromContent(content: string): string {

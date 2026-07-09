@@ -166,6 +166,7 @@ function createGreetingStream(
           usedMemories: greetingMemories,
           activeThread: await ensureActiveChatThread(input.userId, input.threadId),
           threads: await listChatThreads(input.userId),
+          assistantMessageId: latestAssistantMessageId(messages),
           messages,
         });
       } catch (error) {
@@ -249,6 +250,15 @@ function formatRecentHistory(messages: Array<{ role: "user" | "assistant"; conte
       return `- [${formatTimestamp(message.createdAt)}] ${role}：${content.slice(0, 220)}`;
     })
     .join("\n");
+}
+
+function latestAssistantMessageId(messages: Array<{ role: "user" | "assistant"; id: string }>) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant") return message.id;
+  }
+
+  return undefined;
 }
 
 function formatTimestamp(value: string) {

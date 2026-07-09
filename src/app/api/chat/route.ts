@@ -231,6 +231,7 @@ function createChatStream(
           usedMemories: prepared.memories,
           activeThread,
           threads: await listChatThreads(turnInput.userId),
+          assistantMessageId: latestAssistantMessageId(messages),
           messages,
         });
       } catch (error) {
@@ -367,6 +368,15 @@ async function recoverUnsyncedClientMessages(
 function normalizeClientVisibleMessage(role: "user" | "assistant", content: string) {
   const stripped = stripInternalMetadata(content) || content.trim();
   return role === "user" ? sanitizeVisionDisplayContent(stripped) : stripped;
+}
+
+function latestAssistantMessageId(messages: Array<{ role: "user" | "assistant"; id: string }>) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant") return message.id;
+  }
+
+  return undefined;
 }
 
 function sanitizeVisionDisplayContent(content: string) {
