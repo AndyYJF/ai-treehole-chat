@@ -471,7 +471,12 @@ export function ChatShell() {
       pendingForegroundSyncRef.current = false;
 
       try {
-        await refreshThreadStateRef.current(activeThreadIdRef.current);
+        const threadSynced = await refreshThreadStateRef.current(activeThreadIdRef.current);
+        if (!threadSynced) {
+          pendingForegroundSyncRef.current = true;
+          return;
+        }
+
         await Promise.allSettled([
           refreshMemories(),
           refreshUsage(),
