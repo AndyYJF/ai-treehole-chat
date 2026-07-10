@@ -17,6 +17,8 @@ export type StoredChatMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  clientTurnId?: string;
+  clientMessageId?: string;
 };
 
 type InMemoryThreadState = {
@@ -144,9 +146,9 @@ export async function listChatMessages(
   await ensureChatSchema(userId);
 
   const { rows } = await pool.query(
-    `select id, thread_id, role, content, created_at
+    `select id, thread_id, role, content, created_at, client_turn_id, client_message_id
     from (
-      select id, thread_id, role, content, created_at
+      select id, thread_id, role, content, created_at, client_turn_id, client_message_id
       from chat_messages
       where user_id = $1 and thread_id = $2
       order by created_at desc, id desc
@@ -173,9 +175,9 @@ export async function listRecentChatMessages(userId: string, limit = 24): Promis
   await ensureChatSchema(userId);
 
   const { rows } = await pool.query(
-    `select id, thread_id, role, content, created_at
+    `select id, thread_id, role, content, created_at, client_turn_id, client_message_id
     from (
-      select id, thread_id, role, content, created_at
+      select id, thread_id, role, content, created_at, client_turn_id, client_message_id
       from chat_messages
       where user_id = $1
       order by created_at desc, id desc
@@ -191,7 +193,7 @@ export async function listRecentChatMessages(userId: string, limit = 24): Promis
 export async function appendChatMessages(
   userId: string,
   threadId: string | null | undefined,
-  messages: Array<Pick<StoredChatMessage, "role" | "content">>,
+  messages: Array<Pick<StoredChatMessage, "role" | "content" | "clientTurnId" | "clientMessageId">>,
 ): Promise<StoredChatMessage[]> {
   const thread = await ensureActiveChatThread(userId, threadId);
   const baseTime = Date.now();
@@ -200,6 +202,8 @@ export async function appendChatMessages(
     threadId: thread.id,
     role: message.role,
     content: message.content,
+    clientTurnId: message.clientTurnId,
+    clientMessageId: message.clientMessageId,
     createdAt: new Date(baseTime + index).toISOString(),
   }));
 
@@ -218,9 +222,10 @@ export async function appendChatMessages(
 
   for (const message of created) {
     await pool.query(
-      `insert into chat_messages (id, thread_id, user_id, role, content, created_at)
-      values ($1, $2, $3, $4, $5, $6)`,
-      [message.id, thread.id, userId, message.role, message.content, message.createdAt],
+      `insert into chat_messages (id, thread_id, user_id, role, content, client_turn_id, client_message_id, created_at)
+      values ($1, $2, $3, $4, $5, $6, $7, $8)
+      on conflict (user_id, client_message_id) do nothing`,
+      [message.id, thread.id, userId, message.role, message.content, message.clientTurnId, message.clientMessageId, message.createdAt],
     );
   }
 
@@ -333,11 +338,17 @@ async function ensureChatSchema(userId: string) {
       user_id text not null,
       role text not null check (role in ('user', 'assistant')),
       content text not null,
+      client_turn_id text,
+      client_message_id text,
       created_at timestamptz not null default now()
     );
 
     alter table chat_messages
-      add column if not exists thread_id text;
+      add column if not exists thread_id text,
+      add column if not exists client_turn_id text,
+      add column if not exists client_message_id text;
+
+    create unique index if not exists chat_messages_client_msg_idx on chat_messages (user_id, client_message_id);
 
     create index if not exists chat_threads_user_updated_idx
       on chat_threads (user_id, archived_at, updated_at desc);
@@ -464,5 +475,7 @@ function messageFromRow(row: Record<string, unknown>): StoredChatMessage {
     role: row.role as StoredChatMessage["role"],
     content: String(row.content),
     createdAt: new Date(String(row.created_at)).toISOString(),
+    clientTurnId: row.client_turn_id ? String(row.client_turn_id) : undefined,
+    clientMessageId: row.client_message_id ? String(row.client_message_id) : undefined,
   };
 }

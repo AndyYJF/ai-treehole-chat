@@ -49,11 +49,10 @@ export function findMergeTarget<T extends Pick<MemoryRecord, "id" | "type" | "co
 export function mergeMemoryRecord(
   base: MemoryRecord,
   incoming: MemoryRecord,
-  options: { applyDecay?: boolean } = {},
 ): MemoryRecord {
-  const shouldApplyDecay = options.applyDecay ?? true;
-  const decayedBase = shouldApplyDecay ? applyMemoryDecay(base) : base;
-  const decayedIncoming = shouldApplyDecay ? applyMemoryDecay(incoming) : incoming;
+
+  const decayedBase = base;
+  const decayedIncoming = incoming;
 
   return {
     ...decayedBase,
@@ -74,12 +73,12 @@ export function maintainMemoryRecords(memories: MemoryRecord[], limit = 80): Mem
   const maintained: MemoryRecord[] = [];
 
   for (const memory of memories) {
-    const decayed = applyMemoryDecay(memory);
+    const decayed = memory;
     const target = findMergeTarget(maintained, decayed);
 
     if (target) {
       const index = maintained.findIndex((item) => item.id === target.id);
-      maintained[index] = mergeMemoryRecord(target, decayed, { applyDecay: false });
+      maintained[index] = mergeMemoryRecord(target, decayed);
       continue;
     }
 

@@ -11,6 +11,7 @@ import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine"
 import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { getRuntimeConfig, type RuntimeConfig } from "@/lib/app-config";
+import { getMemoryRepository } from "@/lib/memory/repository";
 import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { modelTierSchema } from "@/lib/model-routing";
 import { stripInternalMetadata } from "@/lib/prompt";
@@ -22,11 +23,11 @@ import { extractImageDescription } from "@/lib/vision";
 export const runtime = "nodejs";
 
 const maxRecentClientMessages = 12;
-const maxRecoveredClientMessages = 2;
 const maxClientMessageContentLength = 8000;
 
 const chatRequestSchema = z.object({
   threadId: z.string().optional(),
+  clientTurnId: z.string().optional(),
   message: z.string().min(1).max(8000),
   tier: modelTierSchema.default("auto"),
   memoryEnabled: z.boolean().default(true),
@@ -51,29 +52,24 @@ export async function POST(request: Request) {
   try {
     const body = chatRequestSchema.parse(await request.json());
     const userId = getServerUserId();
+    const settings = await getMemoryRepository().getMemorySettings(userId);
+    const memoryEnabled = settings.enabled && body.memoryEnabled;
+
     void maybeMaintainMemories({ userId });
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
     const serverMessages = await listChatMessages(userId, activeThread.id, 24);
-    // Recover turns that reached the UI but never finished persisting (e.g. network drop).
-    const recoveredMessages = await recoverUnsyncedClientMessages(
-      userId,
-      activeThread.id,
-      serverMessages,
-      body.recentMessages,
-    );
-    const historyMessages = [...serverMessages, ...recoveredMessages];
+    const historyMessages = serverMessages;
     const isFirstTurn = historyMessages.length === 0;
-    const message = body.stream
-      ? body.message
-      : await buildVisionAugmentedMessage(body.message, body.imageBase64);
-    const displayMessage = buildUserDisplayMessage(body.message, body.imageBase64);
+    const clientTurnId = body.clientTurnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
     const input = {
       ...body,
-      message,
-      displayMessage,
+      memoryEnabled,
+      message: body.message,
       threadId: activeThread.id,
       userId,
       isFirstTurn,
+      clientTurnId,
       recentMessages: historyMessages.slice(-12).map((message) => ({
         role: message.role,
         content: message.content,
@@ -86,14 +82,17 @@ export async function POST(request: Request) {
     }
 
     // Persist the user turn first so a later failure still keeps it in context.
+    const messageWithVision = await buildVisionAugmentedMessage(input.message, input.imageBase64);
+    const userMessageId = `msg-${input.clientTurnId}-user`;
     await appendChatMessages(userId, activeThread.id, [
-      { role: "user", content: input.displayMessage },
+      { role: "user", content: messageWithVision, clientMessageId: userMessageId, clientTurnId: input.clientTurnId },
     ]);
 
-    const result = await runChatTurn(input);
+    const result = await runChatTurn({ ...input, message: messageWithVision });
     const assistantReply = stripInternalMetadata(result.reply) || "我在。你可以慢慢说。";
+    const assistantMessageId = `msg-${input.clientTurnId}-assistant`;
     const messages = await appendChatMessages(userId, activeThread.id, [
-      { role: "assistant", content: assistantReply },
+      { role: "assistant", content: assistantReply, clientMessageId: assistantMessageId, clientTurnId: input.clientTurnId },
     ]);
     const thread = isFirstTurn
       ? await updateChatThreadTitle(
@@ -101,7 +100,7 @@ export async function POST(request: Request) {
           activeThread.id,
           await summarizeThreadTitle({
             userId,
-            userMessage: input.displayMessage,
+            userMessage: input.message,
             assistantReply,
           }),
         )
@@ -131,7 +130,8 @@ function createChatStream(
     threadId: string;
     userId: string;
     isFirstTurn: boolean;
-    displayMessage: string;
+    clientTurnId: string;
+    memoryEnabled: boolean;
     recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
   },
   signal: AbortSignal,
@@ -159,8 +159,9 @@ function createChatStream(
         };
         // Persist the user message before model work so network/model failures
         // still leave this turn in the next request's server-side context.
+        const userMessageId = `msg-${turnInput.clientTurnId}-user`;
         await appendChatMessages(turnInput.userId, turnInput.threadId, [
-          { role: "user", content: turnInput.displayMessage },
+          { role: "user", content: turnInput.message, clientMessageId: userMessageId, clientTurnId: turnInput.clientTurnId },
         ]);
 
         const prepared = await prepareChatTurn({
@@ -202,23 +203,29 @@ function createChatStream(
         }
 
         const assistantReply = stripInternalMetadata(reply) || "我在。你可以慢慢说。";
-        const memories = await finishChatTurn({
-          userId: turnInput.userId,
-          messageId: prepared.messageId,
-          message: turnInput.message,
-          memoryEnabled: turnInput.memoryEnabled,
-          memories: prepared.memories,
-        });
+        const assistantMessageId = `msg-${turnInput.clientTurnId}-assistant`;
         const messages = await appendChatMessages(turnInput.userId, turnInput.threadId, [
-          { role: "assistant", content: assistantReply },
+          { role: "assistant", content: assistantReply, clientMessageId: assistantMessageId, clientTurnId: turnInput.clientTurnId },
         ]);
+        let memories = prepared.memories.slice(0, 8);
+        try {
+          memories = await finishChatTurn({
+            userId: turnInput.userId,
+            messageId: prepared.messageId,
+            message: turnInput.message,
+            memoryEnabled: turnInput.memoryEnabled,
+            memories: prepared.memories,
+          });
+        } catch (error) {
+          console.error("Memory extraction failed:", error);
+        }
         const activeThread = turnInput.isFirstTurn
           ? await updateChatThreadTitle(
               turnInput.userId,
               turnInput.threadId,
               await summarizeThreadTitle({
                 userId: turnInput.userId,
-                userMessage: turnInput.displayMessage,
+                userMessage: turnInput.message,
                 assistantReply,
               }),
             )
@@ -268,25 +275,17 @@ async function buildVisionAugmentedMessage(
   try {
     onVisionStart?.();
     const description = await extractImageDescription(trimmedImage, config);
-    const userText = message.trim() || "\uff08\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587\uff09";
+    const userText = message.trim() || "请看看这张图片。";
+    const quotedDescription = description.split('\n').map(line => `> ${line}`).join('\n');
 
     return [
-      "[User uploaded an image. Vision description:]",
-      description,
+      `> 📷 **视觉分析提取**：\n${quotedDescription}`,
       "",
-      "[User caption]",
       userText,
     ].join("\n");
   } catch {
     return message;
   }
-}
-
-function buildUserDisplayMessage(message: string, imageBase64?: string) {
-  if (!imageBase64?.trim()) return message;
-
-  const userText = message.trim() || "\u8bf7\u770b\u770b\u8fd9\u5f20\u56fe\u7247\u3002";
-  return `\u3010\u56fe\u7247\u3011${userText}`;
 }
 
 function isVisionConfigured(config: RuntimeConfig) {
@@ -297,78 +296,7 @@ function isVisionConfigured(config: RuntimeConfig) {
   );
 }
 
-const CLIENT_NETWORK_FALLBACK =
-  "刚刚连接不太顺。你说的我先接住，我们可以再试一次。";
 
-async function recoverUnsyncedClientMessages(
-  userId: string,
-  threadId: string,
-  serverMessages: Array<{ role: "user" | "assistant"; content: string; createdAt: string }>,
-  clientRecentMessages: Array<{ role: "user" | "assistant"; content: string }>,
-) {
-  if (clientRecentMessages.length === 0) return [] as Array<{
-    role: "user" | "assistant";
-    content: string;
-    createdAt: string;
-  }>;
-
-  const serverTail = serverMessages.map((message) => ({
-    role: message.role,
-    content: normalizeClientVisibleMessage(message.role, message.content),
-  }));
-  const clientTail = clientRecentMessages.slice(-maxRecentClientMessages).map((message) => ({
-    role: message.role,
-    content: normalizeClientVisibleMessage(message.role, message.content).slice(
-      0,
-      maxClientMessageContentLength,
-    ),
-  }));
-  let overlap = 0;
-
-  for (let size = Math.min(serverTail.length, clientTail.length); size >= 0; size -= 1) {
-    const serverSlice = serverTail.slice(serverTail.length - size);
-    const clientSlice = clientTail.slice(0, size);
-    const matches = serverSlice.every(
-      (message, index) =>
-        message.role === clientSlice[index]?.role && message.content === clientSlice[index]?.content,
-    );
-
-    if (matches) {
-      overlap = size;
-      break;
-    }
-  }
-
-  const missing = clientTail
-    .slice(overlap)
-    .filter((message) => {
-      if (message.role === "assistant" && message.content.trim() === CLIENT_NETWORK_FALLBACK) {
-        return false;
-      }
-      return message.content.trim().length > 0;
-    })
-    .slice(-maxRecoveredClientMessages)
-    .map((message) => ({
-      role: message.role,
-      content: message.content,
-    }));
-
-  if (missing.length === 0) {
-    return [] as Array<{
-      role: "user" | "assistant";
-      content: string;
-      createdAt: string;
-    }>;
-  }
-
-  const persisted = await appendChatMessages(userId, threadId, missing);
-  return persisted.slice(-missing.length);
-}
-
-function normalizeClientVisibleMessage(role: "user" | "assistant", content: string) {
-  const stripped = stripInternalMetadata(content) || content.trim();
-  return role === "user" ? sanitizeVisionDisplayContent(stripped) : stripped;
-}
 
 function latestAssistantMessageId(messages: Array<{ role: "user" | "assistant"; id: string }>) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -379,22 +307,4 @@ function latestAssistantMessageId(messages: Array<{ role: "user" | "assistant"; 
   return undefined;
 }
 
-function sanitizeVisionDisplayContent(content: string) {
-  const looksLikeVisionContext =
-    content.startsWith("[User uploaded an image.") ||
-    content.includes("[\u7528\u6237\u4e0a\u4f20\u4e86\u4e00\u5f20\u56fe\u7247") ||
-    (content.startsWith("[") && content.includes("\n\n[") && content.length > 120);
 
-  if (!looksLikeVisionContext) return content;
-
-  const captionMarker = content.match(/\n\n\[[^\]\n]+\]\n/);
-  const caption = captionMarker
-    ? content.slice((captionMarker.index ?? 0) + captionMarker[0].length).trim()
-    : "";
-  const displayCaption =
-    caption && !caption.includes("\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587")
-      ? caption
-      : "\u8bf7\u770b\u770b\u8fd9\u5f20\u56fe\u7247\u3002";
-
-  return `\u3010\u56fe\u7247\u3011${displayCaption}`;
-}

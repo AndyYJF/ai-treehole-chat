@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createPostgresMemoryRepository } from "./postgres";
-import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
+import { applyMemoryDecay, findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 import {
   addMemoryCandidates as addMemoryCandidatesInMemory,
@@ -101,10 +101,10 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
           "id,user_id,type,content,confidence,importance,sensitivity,source_message_ids,user_confirmed,valid_from,valid_until,created_at,last_seen_at",
         )
         .eq("user_id", userId)
-        .is("valid_until", null);
+        .or("valid_from.is.null,valid_from.lte.now()").or("valid_until.is.null,valid_until.gt.now()");
 
       if (error) throw new Error(`Failed to list memories: ${error.message}`);
-      return (data ?? []).map(memoryFromRow).sort(sortMemoryForPrompt);
+      return (data ?? []).map(memoryFromRow).map(m => applyMemoryDecay(m)).sort(sortMemoryForPrompt);
     },
 
     async addMemoryCandidates(userId, candidates) {

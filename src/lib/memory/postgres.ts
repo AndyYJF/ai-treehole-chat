@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
 import { getPostgresPool } from "../postgres";
 import type { MemoryCandidate, MemoryRecord } from "./types";
-import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
+import { applyMemoryDecay, findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import { sortMemoryForPrompt } from "./store";
 import type { MemoryRepository } from "./repository";
 
@@ -47,11 +47,11 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
         `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
           user_confirmed, valid_from, valid_until, created_at, last_seen_at
         from memories
-        where user_id = $1 and valid_until is null`,
+        where user_id = $1 and (valid_from is null or valid_from <= now()) and (valid_until is null or valid_until > now())`,
         [userId],
       );
 
-      return rows.map(memoryFromRow).sort(sortMemoryForPrompt);
+      return rows.map(memoryFromRow).map(m => applyMemoryDecay(m)).sort(sortMemoryForPrompt);
     },
 
     async addMemoryCandidates(userId, candidates) {
@@ -342,11 +342,11 @@ async function listValidMemories(client: PoolClient, userId: string): Promise<Me
     `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
       user_confirmed, valid_from, valid_until, created_at, last_seen_at
     from memories
-    where user_id = $1 and valid_until is null`,
+    where user_id = $1 and (valid_from is null or valid_from <= now()) and (valid_until is null or valid_until > now())`,
     [userId],
   );
 
-  return rows.map(memoryFromRow);
+  return rows.map(memoryFromRow).map(m => applyMemoryDecay(m));
 }
 
 async function writeMergedMemory(client: PoolClient, userId: string, memory: MemoryRecord) {

@@ -19,6 +19,7 @@ export const runtime = "nodejs";
 
 const greetingRequestSchema = z.object({
   threadId: z.string().optional(),
+  clientTurnId: z.string().optional(),
 });
 
 const greetingThresholdMs = 8 * 60 * 60 * 1000;
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
 
   try {
     // Ignore client threadId: proactive care always writes to the newest timeline.
-    greetingRequestSchema.parse(await request.json().catch(() => ({})));
+    const body = greetingRequestSchema.parse(await request.json().catch(() => ({})));
     const userId = getServerUserId();
     // Proactive care must always land on the newest timeline, not whichever
     // thread the client currently has open.
@@ -66,6 +67,7 @@ export async function POST(request: Request) {
       {
         userId,
         threadId: latestThread.id,
+        clientTurnId: body.clientTurnId || `turn-${now}-${Math.random().toString(36).slice(2)}`,
         recentMessages: serverMessages,
       },
       request.signal,
@@ -81,6 +83,7 @@ function createGreetingStream(
   input: {
     userId: string;
     threadId: string;
+    clientTurnId: string;
     recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt: string }>;
   },
   signal: AbortSignal,

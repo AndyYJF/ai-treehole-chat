@@ -1,5 +1,5 @@
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
-import { maintainMemoryRecords } from "./merge";
+import { applyMemoryDecay, maintainMemoryRecords } from "./merge";
 
 const memoryStore = new Map<string, MemoryRecord[]>();
 const memorySettingsStore = new Map<string, { enabled: boolean }>();
@@ -45,7 +45,7 @@ export function listMemories(userId: string): MemoryRecord[] {
     );
   }
 
-  return [...(memoryStore.get(userId) ?? [])].sort(sortMemoryForPrompt);
+  return [...(memoryStore.get(userId) ?? [])].map(m => applyMemoryDecay(m)).sort(sortMemoryForPrompt);
 }
 
 export function getMemorySettings(userId: string) {
