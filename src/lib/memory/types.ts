@@ -22,6 +22,7 @@ export const memoryRecordSchema = z.object({
   sensitivity: sensitivitySchema,
   sourceMessageIds: z.array(z.string()),
   userConfirmed: z.boolean(),
+  revision: z.number().int().min(1),
   validFrom: z.string().nullable(),
   validUntil: z.string().nullable(),
   createdAt: z.string(),

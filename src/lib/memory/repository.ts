@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createPostgresMemoryRepository } from "./postgres";
+import { SyncConflictError } from "../sync-conflict";
 import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 import {
@@ -10,6 +11,7 @@ import {
   deleteMemory as deleteMemoryInMemory,
   getMemorySettings as getMemorySettingsInMemory,
   maintainMemories as maintainMemoriesInMemory,
+  listAllMemories as listAllMemoriesInMemory,
   listMemories as listMemoriesInMemory,
   setMemoryEnabled as setMemoryEnabledInMemory,
   sortMemoryForPrompt,
@@ -18,18 +20,20 @@ import {
 
 export type MemorySettings = {
   enabled: boolean;
+  revision: number;
 };
 
 export type MemoryRepository = {
   listMemories(userId: string): Promise<MemoryRecord[]>;
+  listAllMemories(userId: string): Promise<MemoryRecord[]>;
   addMemoryCandidates(userId: string, candidates: MemoryCandidate[]): Promise<MemoryRecord[]>;
-  confirmMemory(userId: string, memoryId: string): Promise<MemoryRecord[]>;
-  updateMemory(userId: string, memoryId: string, update: MemoryUpdate): Promise<MemoryRecord[]>;
-  deleteMemory(userId: string, memoryId: string): Promise<MemoryRecord[]>;
+  confirmMemory(userId: string, memoryId: string, expectedRevision?: number): Promise<MemoryRecord[]>;
+  updateMemory(userId: string, memoryId: string, update: MemoryUpdate, expectedRevision?: number): Promise<MemoryRecord[]>;
+  deleteMemory(userId: string, memoryId: string, expectedRevision?: number): Promise<MemoryRecord[]>;
   clearMemories(userId: string): Promise<MemoryRecord[]>;
   maintainMemories(userId: string): Promise<MemoryRecord[]>;
   getMemorySettings(userId: string): Promise<MemorySettings>;
-  setMemoryEnabled(userId: string, enabled: boolean): Promise<MemorySettings>;
+  setMemoryEnabled(userId: string, enabled: boolean, expectedRevision?: number): Promise<MemorySettings>;
 };
 
 let cachedRepository: MemoryRepository | null = null;
@@ -66,16 +70,22 @@ const inMemoryMemoryRepository: MemoryRepository = {
   async listMemories(userId) {
     return listMemoriesInMemory(userId);
   },
+  async listAllMemories(userId) {
+    return listAllMemoriesInMemory(userId);
+  },
   async addMemoryCandidates(userId, candidates) {
     return addMemoryCandidatesInMemory(userId, candidates);
   },
-  async confirmMemory(userId, memoryId) {
+  async confirmMemory(userId, memoryId, expectedRevision) {
+    assertExpectedMemoryRevision(listMemoriesInMemory(userId), memoryId, expectedRevision);
     return confirmMemoryInMemory(userId, memoryId);
   },
-  async updateMemory(userId, memoryId, update) {
+  async updateMemory(userId, memoryId, update, expectedRevision) {
+    assertExpectedMemoryRevision(listMemoriesInMemory(userId), memoryId, expectedRevision);
     return updateMemoryInMemory(userId, memoryId, update);
   },
-  async deleteMemory(userId, memoryId) {
+  async deleteMemory(userId, memoryId, expectedRevision) {
+    assertExpectedMemoryRevision(listMemoriesInMemory(userId), memoryId, expectedRevision);
     return deleteMemoryInMemory(userId, memoryId);
   },
   async clearMemories(userId) {
@@ -87,7 +97,9 @@ const inMemoryMemoryRepository: MemoryRepository = {
   async getMemorySettings(userId) {
     return getMemorySettingsInMemory(userId);
   },
-  async setMemoryEnabled(userId, enabled) {
+  async setMemoryEnabled(userId, enabled, expectedRevision) {
+    const current = getMemorySettingsInMemory(userId);
+    if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
     return setMemoryEnabledInMemory(userId, enabled);
   },
 };
@@ -95,13 +107,27 @@ const inMemoryMemoryRepository: MemoryRepository = {
 function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepository {
   return {
     async listMemories(userId) {
+      const now = new Date().toISOString();
       const { data, error } = await client
         .from("memories")
         .select(
           "id,user_id,type,content,confidence,importance,sensitivity,source_message_ids,user_confirmed,valid_from,valid_until,created_at,last_seen_at",
         )
         .eq("user_id", userId)
-        .is("valid_until", null);
+        .or(`valid_from.is.null,valid_from.lte.${now}`)
+        .or(`valid_until.is.null,valid_until.gt.${now}`);
+
+      if (error) throw new Error(`Failed to list memories: ${error.message}`);
+      return (data ?? []).map(memoryFromRow).sort(sortMemoryForPrompt);
+    },
+
+    async listAllMemories(userId) {
+      const { data, error } = await client
+        .from("memories")
+        .select(
+          "id,user_id,type,content,confidence,importance,sensitivity,source_message_ids,user_confirmed,valid_from,valid_until,created_at,last_seen_at",
+        )
+        .eq("user_id", userId);
 
       if (error) throw new Error(`Failed to list memories: ${error.message}`);
       return (data ?? []).map(memoryFromRow).sort(sortMemoryForPrompt);
@@ -118,7 +144,7 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
         const target = findMergeTarget(existing, incoming);
 
         if (target) {
-          const merged = mergeMemoryRecord(target, incoming);
+          const merged = { ...mergeMemoryRecord(target, incoming), revision: target.revision + 1 };
           const { error } = await client
             .from("memories")
             .update(memoryToSupabaseUpdate(merged))
@@ -138,8 +164,12 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       return this.listMemories(userId);
     },
 
-    async confirmMemory(userId, memoryId) {
+    async confirmMemory(userId, memoryId, expectedRevision) {
       const now = new Date().toISOString();
+      const existing = await this.listMemories(userId);
+      const current = existing.find((memory) => memory.id === memoryId);
+      if (!current) return existing;
+      if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
       const { error } = await client
         .from("memories")
         .update({
@@ -154,11 +184,12 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       return this.listMemories(userId);
     },
 
-    async updateMemory(userId, memoryId, update) {
+    async updateMemory(userId, memoryId, update, expectedRevision) {
       const now = new Date().toISOString();
       const existing = await this.listMemories(userId);
       const current = existing.find((memory) => memory.id === memoryId);
       if (!current) return existing;
+      if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
 
       const incoming: MemoryRecord = {
         ...current,
@@ -168,12 +199,13 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
         sensitivity: update.sensitivity,
         userConfirmed: true,
         confidence: Math.max(current.confidence, 0.9),
+        revision: current.revision + 1,
         lastSeenAt: now,
       };
       const target = findMergeTarget(existing, incoming, memoryId);
 
       if (target) {
-        const merged = mergeMemoryRecord(target, incoming);
+        const merged = { ...mergeMemoryRecord(target, incoming), revision: target.revision + 1 };
         const { error: updateError } = await client
           .from("memories")
           .update(memoryToSupabaseUpdate(merged))
@@ -182,19 +214,31 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
 
         if (updateError) throw new Error(`Failed to merge memory: ${updateError.message}`);
 
-        const { error: deleteError } = await client.from("memories").delete().eq("user_id", userId).eq("id", memoryId);
+        const { error: deleteError } = await client
+          .from("memories")
+          .delete()
+          .eq("user_id", userId)
+          .eq("id", memoryId);
         if (deleteError) throw new Error(`Failed to merge memory: ${deleteError.message}`);
 
         return this.listMemories(userId);
       }
 
-      const { error } = await client.from("memories").update(memoryToSupabaseUpdate(incoming)).eq("user_id", userId).eq("id", memoryId);
+      const { error } = await client
+        .from("memories")
+        .update(memoryToSupabaseUpdate(incoming))
+        .eq("user_id", userId)
+        .eq("id", memoryId);
 
       if (error) throw new Error(`Failed to update memory: ${error.message}`);
       return this.listMemories(userId);
     },
 
-    async deleteMemory(userId, memoryId) {
+    async deleteMemory(userId, memoryId, expectedRevision) {
+      if (expectedRevision != null) {
+        const current = await this.listMemories(userId);
+        assertExpectedMemoryRevision(current, memoryId, expectedRevision);
+      }
       const { error } = await client.from("memories").delete().eq("user_id", userId).eq("id", memoryId);
       if (error) throw new Error(`Failed to delete memory: ${error.message}`);
       return this.listMemories(userId);
@@ -239,10 +283,12 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
         .maybeSingle();
 
       if (error) throw new Error(`Failed to read memory settings: ${error.message}`);
-      return { enabled: data?.enabled ?? true };
+      return { enabled: data?.enabled ?? true, revision: 1 };
     },
 
-    async setMemoryEnabled(userId, enabled) {
+    async setMemoryEnabled(userId, enabled, expectedRevision) {
+      const current = await this.getMemorySettings(userId);
+      if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
       const { error } = await client.from("user_memory_settings").upsert(
         {
           user_id: userId,
@@ -253,9 +299,15 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
       );
 
       if (error) throw new Error(`Failed to update memory settings: ${error.message}`);
-      return { enabled };
+      return { enabled, revision: 1 };
     },
   };
+}
+
+function assertExpectedMemoryRevision(memories: MemoryRecord[], memoryId: string, expectedRevision?: number) {
+  if (expectedRevision == null) return;
+  const current = memories.find((memory) => memory.id === memoryId);
+  if (!current || current.revision !== expectedRevision) throw new SyncConflictError();
 }
 
 function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, now: string): MemoryRecord {
@@ -269,6 +321,7 @@ function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, n
     sensitivity: candidate.sensitivity,
     sourceMessageIds: candidate.sourceMessageIds,
     userConfirmed: false,
+    revision: 1,
     validFrom: candidate.validFrom,
     validUntil: candidate.validUntil,
     createdAt: now,
@@ -321,6 +374,7 @@ function memoryFromRow(row: Record<string, unknown>): MemoryRecord {
     sensitivity: row.sensitivity as MemoryRecord["sensitivity"],
     sourceMessageIds: Array.isArray(row.source_message_ids) ? row.source_message_ids.map(String) : [],
     userConfirmed: Boolean(row.user_confirmed),
+    revision: Math.max(1, Number(row.revision ?? 1)),
     validFrom: row.valid_from ? String(row.valid_from) : null,
     validUntil: row.valid_until ? String(row.valid_until) : null,
     createdAt: String(row.created_at),

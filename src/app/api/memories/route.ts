@@ -5,6 +5,7 @@ import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { memoryTypeSchema, sensitivitySchema } from "@/lib/memory/types";
 import { getServerUserId } from "@/lib/server-user";
+import { isSyncConflictError } from "@/lib/sync-conflict";
 
 export const runtime = "nodejs";
 
@@ -12,6 +13,7 @@ const memoryPatchSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("confirm"),
     memoryId: z.string(),
+    expectedRevision: z.number().int().min(1).optional(),
   }),
   z.object({
     action: z.literal("update"),
@@ -20,14 +22,17 @@ const memoryPatchSchema = z.discriminatedUnion("action", [
     content: z.string().min(4).max(200),
     importance: z.number().int().min(0).max(100),
     sensitivity: sensitivitySchema,
+    expectedRevision: z.number().int().min(1).optional(),
   }),
   z.object({
     action: z.literal("delete"),
     memoryId: z.string(),
+    expectedRevision: z.number().int().min(1).optional(),
   }),
   z.object({
     action: z.literal("setEnabled"),
     enabled: z.boolean(),
+    expectedRevision: z.number().int().min(1).optional(),
   }),
   z.object({
     action: z.literal("maintain"),
@@ -59,7 +64,7 @@ export async function PATCH(request: Request) {
 
     if (body.action === "confirm") {
       return NextResponse.json({
-        memories: await repository.confirmMemory(userId, body.memoryId),
+        memories: await repository.confirmMemory(userId, body.memoryId, body.expectedRevision),
         settings: await repository.getMemorySettings(userId),
       });
     }
@@ -71,14 +76,14 @@ export async function PATCH(request: Request) {
           content: body.content,
           importance: body.importance,
           sensitivity: body.sensitivity,
-        }),
+        }, body.expectedRevision),
         settings: await repository.getMemorySettings(userId),
       });
     }
 
     if (body.action === "delete") {
       return NextResponse.json({
-        memories: await repository.deleteMemory(userId, body.memoryId),
+        memories: await repository.deleteMemory(userId, body.memoryId, body.expectedRevision),
         settings: await repository.getMemorySettings(userId),
       });
     }
@@ -92,9 +97,15 @@ export async function PATCH(request: Request) {
 
     return NextResponse.json({
       memories: await repository.listMemories(userId),
-      settings: await repository.setMemoryEnabled(userId, body.enabled),
+      settings: await repository.setMemoryEnabled(userId, body.enabled, body.expectedRevision),
     });
   } catch (error) {
+    if (isSyncConflictError(error)) {
+      return NextResponse.json(
+        { code: error.code, error: "该记录已在另一台设备上更新，请刷新后再试。" },
+        { status: 409 },
+      );
+    }
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 400 });
   }

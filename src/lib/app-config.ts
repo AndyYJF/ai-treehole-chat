@@ -1,4 +1,5 @@
 import { randomBytes } from "crypto";
+import { decryptConfigSecret, encryptConfigSecret } from "./config-secret";
 import { getPostgresPool } from "./postgres";
 
 export type RuntimeConfig = {
@@ -39,6 +40,7 @@ export type SetupConfigInput = {
 
 export type VisionConfigInput = {
   visionApiKey?: string;
+  clearVisionApiKey?: boolean;
   visionBaseUrl?: string;
   visionModelName?: string;
 };
@@ -62,6 +64,16 @@ const configKeys = [
 ] as const;
 
 type ConfigKey = (typeof configKeys)[number];
+
+const secretConfigKeys = new Set<ConfigKey>([
+  "treeholeAccessToken",
+  "treeholeSessionSecret",
+  "deepseekApiKey",
+  "siliconFlowApiKey",
+  "tavilyApiKey",
+  "braveSearchApiKey",
+  "visionApiKey",
+]);
 
 const inMemoryConfig = new Map<ConfigKey, string>();
 let schemaReady: Promise<void> | null = null;
@@ -141,7 +153,7 @@ export async function saveSetupConfig(input: SetupConfigInput) {
       values ($1, $2, now())
       on conflict (key)
       do update set value = excluded.value, updated_at = now()`,
-      [key, values[key]],
+      [key, protectConfigValue(key, values[key])],
     );
   }
 
@@ -149,8 +161,11 @@ export async function saveSetupConfig(input: SetupConfigInput) {
 }
 
 export async function updateVisionConfig(input: VisionConfigInput) {
+  const current = await getRuntimeConfig();
   const values: Pick<Record<ConfigKey, string>, "visionApiKey" | "visionBaseUrl" | "visionModelName"> = {
-    visionApiKey: input.visionApiKey?.trim() ?? "",
+    visionApiKey: input.clearVisionApiKey
+      ? ""
+      : input.visionApiKey?.trim() || current.visionApiKey,
     visionBaseUrl:
       input.visionBaseUrl?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
     visionModelName: input.visionModelName?.trim() || "gemini-3.1-pro-preview",
@@ -167,13 +182,13 @@ export async function updateVisionConfig(input: VisionConfigInput) {
 
   await ensureConfigSchema();
 
-  for (const [key, value] of Object.entries(values)) {
+  for (const [key, value] of Object.entries(values) as Array<[keyof typeof values, string]>) {
     await pool.query(
       `insert into app_config (key, value, updated_at)
       values ($1, $2, now())
       on conflict (key)
       do update set value = excluded.value, updated_at = now()`,
-      [key, value],
+      [key, protectConfigValue(key, value)],
     );
   }
 
@@ -194,7 +209,7 @@ async function readStoredConfig(): Promise<Partial<Record<ConfigKey, string>>> {
 
   for (const row of rows) {
     const key = row.key;
-    if (isConfigKey(key)) config[key] = String(row.value ?? "");
+    if (isConfigKey(key)) config[key] = revealConfigValue(key, String(row.value ?? ""));
   }
 
   return config;
@@ -229,4 +244,12 @@ function parseBoolean(value: string | undefined) {
 
 function randomSecret() {
   return randomBytes(32).toString("hex");
+}
+
+function protectConfigValue(key: ConfigKey, value: string) {
+  return secretConfigKeys.has(key) ? encryptConfigSecret(value) : value;
+}
+
+function revealConfigValue(key: ConfigKey, value: string) {
+  return secretConfigKeys.has(key) ? decryptConfigSecret(value) : value;
 }

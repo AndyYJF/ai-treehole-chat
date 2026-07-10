@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireApiSession } from "@/lib/auth-runtime";
-import { listChatMessages, listChatThreads } from "@/lib/chat-history";
+import { listAllChatMessages, listChatThreads } from "@/lib/chat-history";
 import { listLetters } from "@/lib/letters";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { getModelUsageSummary, listModelUsage } from "@/lib/model-usage";
@@ -14,22 +14,39 @@ export async function GET(request: Request) {
 
   const userId = getServerUserId();
   const repository = getMemoryRepository();
+  const [threads, messages, letters, memories, memorySettings, usageSummary, usageEvents] = await Promise.all([
+    listChatThreads(userId),
+    listAllChatMessages(userId),
+    listLetters(userId),
+    repository.listAllMemories(userId),
+    repository.getMemorySettings(userId),
+    getModelUsageSummary(userId),
+    listModelUsage(userId),
+  ]);
+
+  const messagesByThread = new Map<string, typeof messages>();
+  for (const message of messages) {
+    const current = messagesByThread.get(message.threadId) ?? [];
+    current.push(message);
+    messagesByThread.set(message.threadId, current);
+  }
 
   return NextResponse.json({
+    format: "ai-treehole-chat-export",
+    schemaVersion: 2,
     exportedAt: new Date().toISOString(),
     userId,
-    threads: await Promise.all(
-      (await listChatThreads(userId)).map(async (thread) => ({
-        ...thread,
-        messages: await listChatMessages(userId, thread.id, 500),
-      })),
-    ),
-    letters: await listLetters(userId),
-    memories: await repository.listMemories(userId),
-    memorySettings: await repository.getMemorySettings(userId),
+    threads: threads.map((thread) => ({
+      ...thread,
+      messages: messagesByThread.get(thread.id) ?? [],
+    })),
+    letters,
+    // Includes inactive/expired records so an export remains a complete copy.
+    memories,
+    memorySettings,
     modelUsage: {
-      summary: await getModelUsageSummary(userId),
-      recent: await listModelUsage(userId, 100),
+      summary: usageSummary,
+      events: usageEvents,
     },
   });
 }

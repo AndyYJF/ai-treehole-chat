@@ -4,6 +4,7 @@ import { callDeepSeek } from "@/lib/deepseek";
 import { createLetter, listLetters } from "@/lib/letters";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import type { MemoryRecord } from "@/lib/memory/types";
+import { selectProactiveMemories } from "@/lib/memory/policy";
 import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
@@ -36,6 +37,10 @@ export async function POST(request: Request) {
     }
 
     const repository = getMemoryRepository();
+    const memorySettings = await repository.getMemorySettings(userId);
+    if (!memorySettings.enabled) {
+      return new Response(null, { status: 204 });
+    }
     const memories = selectLetterMemories(await repository.listMemories(userId));
 
     if (memories.length < minimumMemoryCount) {
@@ -91,8 +96,7 @@ function shouldCreateLetter(lastLetterAt: string | null) {
 function selectLetterMemories(memories: MemoryRecord[]) {
   const since = Date.now() - letterWindowDays * 24 * 60 * 60 * 1000;
 
-  return memories
-    .filter((memory) => memory.type === "affect" || memory.type === "episodic")
+  return selectProactiveMemories(memories, 36)
     .filter((memory) => {
       const timestamp = new Date(memory.lastSeenAt || memory.createdAt).getTime();
       return !Number.isNaN(timestamp) && timestamp >= since;

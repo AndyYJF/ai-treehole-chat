@@ -1,6 +1,8 @@
 node_modules
 .next
 .env
+.env.*
+!.env.example
 .env.local
 .git
 *.log
@@ -9,6 +11,5 @@ Dockerfile
 docker-compose.yml
 README.md
 docs
-public/sw.js
 public/workbox-*.js
 

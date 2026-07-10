@@ -1,23 +1,33 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import {
   appendChatMessages,
+  claimChatTurn,
+  completeChatTurn,
   ensureActiveChatThread,
+  failChatTurn,
+  getChatTurn,
   listChatMessages,
   listChatThreads,
   updateChatThreadTitle,
+  type ChatMessageContext,
+  type ChatTurnRecord,
 } from "@/lib/chat-history";
-import { finishChatTurn, prepareChatTurn, runChatTurn } from "@/lib/chat-engine";
-import { streamDeepSeek } from "@/lib/deepseek";
+import { finishChatTurn, prepareChatTurn } from "@/lib/chat-engine";
+import { callDeepSeek, streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { getRuntimeConfig, type RuntimeConfig } from "@/lib/app-config";
 import { maybeMaintainMemories } from "@/lib/memory/maintenance";
-import { modelTierSchema } from "@/lib/model-routing";
+import { getMemoryRepository } from "@/lib/memory/repository";
+import { modelTierSchema, routeModel } from "@/lib/model-routing";
 import { stripInternalMetadata } from "@/lib/prompt";
 import type { RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
+import { requestRateLimitKey, takeRateLimit } from "@/lib/rate-limit";
+import { assessSafetyRisk } from "@/lib/safety";
 import { summarizeThreadTitle } from "@/lib/thread-title";
-import { extractImageDescription } from "@/lib/vision";
+import { extractImageAnalysis, type VisionAnalysis } from "@/lib/vision";
 
 export const runtime = "nodejs";
 
@@ -27,6 +37,8 @@ const maxClientMessageContentLength = 8000;
 
 const chatRequestSchema = z.object({
   threadId: z.string().optional(),
+  clientTurnId: z.string().min(1).max(100).optional(),
+  recoveryClientTurnId: z.string().min(1).max(100).optional(),
   message: z.string().min(1).max(8000),
   tier: modelTierSchema.default("auto"),
   memoryEnabled: z.boolean().default(true),
@@ -36,6 +48,7 @@ const chatRequestSchema = z.object({
   recentMessages: z
     .array(
       z.object({
+        id: z.string().min(1).max(160).optional(),
         role: z.enum(["user", "assistant"]),
         content: z.string().max(maxClientMessageContentLength),
       }),
@@ -47,29 +60,75 @@ const chatRequestSchema = z.object({
 export async function POST(request: Request) {
   const unauthorized = await requireApiSession(request);
   if (unauthorized) return unauthorized;
+  let claimedTurn: { userId: string; clientTurnId: string } | null = null;
 
   try {
     const body = chatRequestSchema.parse(await request.json());
     const userId = getServerUserId();
+    const rateLimit = takeRateLimit(requestRateLimitKey(request, "chat", userId), {
+      limit: 30,
+      windowMs: 60_000,
+    });
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: "Too many chat requests. Please wait a moment.", code: "RATE_LIMITED" },
+        { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } },
+      );
+    }
+    const memorySettings = await getMemoryRepository().getMemorySettings(userId);
+    const memoryEnabled = memorySettings.enabled && body.memoryEnabled;
     void maybeMaintainMemories({ userId });
     const activeThread = await ensureActiveChatThread(userId, body.threadId);
-    const serverMessages = await listChatMessages(userId, activeThread.id, 24);
+    const clientTurnId = body.clientTurnId ?? `legacy-${randomUUID()}`;
+    const claim = await claimChatTurn(userId, activeThread.id, clientTurnId);
+
+    if (claim.state === "completed") {
+      return completedTurnResponse({
+        userId,
+        activeThreadId: activeThread.id,
+        turn: claim.turn,
+        tier: body.tier,
+        message: body.message,
+        memoryEnabled,
+      });
+    }
+
+    if (claim.state === "in_progress") {
+      return NextResponse.json(
+        { error: "This chat turn is already being processed", code: "TURN_IN_PROGRESS" },
+        { status: 409 },
+      );
+    }
+
+    claimedTurn = { userId, clientTurnId };
+    const serverMessages = (await listChatMessages(userId, activeThread.id, 24)).filter(
+      (message) =>
+        message.id !== claim.turn.userMessageId &&
+        message.id !== claim.turn.assistantMessageId,
+    );
     // Recover turns that reached the UI but never finished persisting (e.g. network drop).
     const recoveredMessages = await recoverUnsyncedClientMessages(
       userId,
       activeThread.id,
       serverMessages,
       body.recentMessages,
+      body.recoveryClientTurnId,
     );
     const historyMessages = [...serverMessages, ...recoveredMessages];
     const isFirstTurn = historyMessages.length === 0;
-    const message = body.stream
-      ? body.message
-      : await buildVisionAugmentedMessage(body.message, body.imageBase64);
+    const visionResult = body.stream
+      ? { analysis: undefined, warning: undefined }
+      : await analyzeVisionForTurn(body.message, body.imageBase64);
     const displayMessage = buildUserDisplayMessage(body.message, body.imageBase64);
     const input = {
       ...body,
-      message,
+      memoryEnabled,
+      clientTurnId,
+      turn: claim.turn,
+      message: body.message,
+      memorySourceMessage: body.message,
+      visionAnalysis: visionResult.analysis,
+      visionWarning: visionResult.warning,
       displayMessage,
       threadId: activeThread.id,
       userId,
@@ -78,6 +137,7 @@ export async function POST(request: Request) {
         role: message.role,
         content: message.content,
         createdAt: message.createdAt,
+        context: message.context,
       })),
     };
 
@@ -86,15 +146,49 @@ export async function POST(request: Request) {
     }
 
     // Persist the user turn first so a later failure still keeps it in context.
-    await appendChatMessages(userId, activeThread.id, [
-      { role: "user", content: input.displayMessage },
+    const messagesAfterUser = await appendChatMessages(userId, activeThread.id, [
+      {
+        id: claim.turn.userMessageId,
+        turnId: claim.turn.id,
+        role: "user",
+        content: input.displayMessage,
+        context: {
+          vision: input.visionAnalysis,
+          visionWarning: input.visionWarning,
+        },
+      },
     ]);
+    const userMessageId = latestMessageId(messagesAfterUser, "user");
 
-    const result = await runChatTurn(input);
-    const assistantReply = stripInternalMetadata(result.reply) || "我在。你可以慢慢说。";
+    const prepared = await prepareChatTurn({
+      ...input,
+      messageId: userMessageId,
+    });
+    const reply = await callDeepSeek({
+      userId,
+      operation: "chat",
+      model: prepared.routed.model,
+      messages: prepared.promptMessages,
+      temperature: input.temperature,
+      signal: request.signal,
+    });
+    const assistantReply = stripInternalMetadata(reply) || "我在。你可以慢慢说。";
     const messages = await appendChatMessages(userId, activeThread.id, [
-      { role: "assistant", content: assistantReply },
+      {
+        id: claim.turn.assistantMessageId,
+        turnId: claim.turn.id,
+        role: "assistant",
+        content: assistantReply,
+      },
     ]);
+    await completeChatTurn(userId, clientTurnId);
+    const memories = await finishChatTurn({
+      userId,
+      messageId: prepared.messageId,
+      message: input.memorySourceMessage,
+      memoryEnabled,
+      memories: prepared.memories,
+    });
     const thread = isFirstTurn
       ? await updateChatThreadTitle(
           userId,
@@ -108,13 +202,19 @@ export async function POST(request: Request) {
       : await ensureActiveChatThread(userId, activeThread.id);
 
     return NextResponse.json({
-      ...result,
       reply: assistantReply,
+      routed: prepared.routed,
+      memories,
+      usedMemories: prepared.memories,
+      visionWarning: input.visionWarning,
       activeThread: thread,
       threads: await listChatThreads(userId),
       messages,
     });
   } catch (error) {
+    if (claimedTurn) {
+      await failChatTurn(claimedTurn.userId, claimedTurn.clientTurnId).catch(() => undefined);
+    }
     const message = error instanceof Error ? error.message : "Unknown error";
 
     return NextResponse.json(
@@ -132,7 +232,17 @@ function createChatStream(
     userId: string;
     isFirstTurn: boolean;
     displayMessage: string;
-    recentMessages: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
+    memorySourceMessage: string;
+    visionAnalysis?: VisionAnalysis;
+    visionWarning?: string;
+    clientTurnId: string;
+    turn: ChatTurnRecord;
+    recentMessages: Array<{
+      role: "user" | "assistant";
+      content: string;
+      createdAt?: string;
+      context?: { vision?: VisionAnalysis; visionWarning?: string };
+    }>;
   },
   signal: AbortSignal,
 ) {
@@ -145,26 +255,39 @@ function createChatStream(
       };
 
       try {
+        const visionResult = await analyzeVisionForTurn(input.message, input.imageBase64, () => {
+          send({
+            type: "status",
+            status: {
+              type: "vision",
+              label: "识图中",
+            },
+          });
+        });
         const turnInput = {
           ...input,
-          message: await buildVisionAugmentedMessage(input.message, input.imageBase64, () => {
-            send({
-              type: "status",
-              status: {
-                type: "vision",
-                label: "\u8bc6\u56fe\u4e2d",
-              },
-            });
-          }),
+          visionAnalysis: visionResult.analysis,
+          visionWarning: visionResult.warning,
         };
         // Persist the user message before model work so network/model failures
         // still leave this turn in the next request's server-side context.
-        await appendChatMessages(turnInput.userId, turnInput.threadId, [
-          { role: "user", content: turnInput.displayMessage },
+        const messagesAfterUser = await appendChatMessages(turnInput.userId, turnInput.threadId, [
+          {
+            id: turnInput.turn.userMessageId,
+            turnId: turnInput.turn.id,
+            role: "user",
+            content: turnInput.displayMessage,
+            context: {
+              vision: turnInput.visionAnalysis,
+              visionWarning: turnInput.visionWarning,
+            },
+          },
         ]);
+        const userMessageId = latestMessageId(messagesAfterUser, "user");
 
         const prepared = await prepareChatTurn({
           ...turnInput,
+          messageId: userMessageId,
           onRealityStatus: (status: RealityContextStatus) => {
             send({
               type: "status",
@@ -202,16 +325,23 @@ function createChatStream(
         }
 
         const assistantReply = stripInternalMetadata(reply) || "我在。你可以慢慢说。";
+        // The primary conversation is durable before optional memory/title work.
+        const messages = await appendChatMessages(turnInput.userId, turnInput.threadId, [
+          {
+            id: turnInput.turn.assistantMessageId,
+            turnId: turnInput.turn.id,
+            role: "assistant",
+            content: assistantReply,
+          },
+        ]);
+        await completeChatTurn(turnInput.userId, turnInput.clientTurnId);
         const memories = await finishChatTurn({
           userId: turnInput.userId,
           messageId: prepared.messageId,
-          message: turnInput.message,
+          message: turnInput.memorySourceMessage,
           memoryEnabled: turnInput.memoryEnabled,
           memories: prepared.memories,
         });
-        const messages = await appendChatMessages(turnInput.userId, turnInput.threadId, [
-          { role: "assistant", content: assistantReply },
-        ]);
         const activeThread = turnInput.isFirstTurn
           ? await updateChatThreadTitle(
               turnInput.userId,
@@ -233,8 +363,10 @@ function createChatStream(
           threads: await listChatThreads(turnInput.userId),
           assistantMessageId: latestAssistantMessageId(messages),
           messages,
+          visionWarning: turnInput.visionWarning,
         });
       } catch (error) {
+        await failChatTurn(input.userId, input.clientTurnId).catch(() => undefined);
         const message = error instanceof Error ? error.message : "Unknown error";
         send({
           type: "error",
@@ -254,31 +386,66 @@ function createChatStream(
   });
 }
 
-async function buildVisionAugmentedMessage(
+async function completedTurnResponse(input: {
+  userId: string;
+  activeThreadId: string;
+  turn: ChatTurnRecord;
+  tier: z.infer<typeof modelTierSchema>;
+  message: string;
+  memoryEnabled: boolean;
+}) {
+  const messages = await listChatMessages(input.userId, input.activeThreadId, 200);
+  const assistantMessage = messages.find((message) => message.id === input.turn.assistantMessageId);
+  const userMessage = messages.find((message) => message.id === input.turn.userMessageId);
+  const repository = getMemoryRepository();
+  const memories = input.memoryEnabled ? await repository.listMemories(input.userId) : [];
+  const routed = routeModel({
+    userTier: input.tier,
+    latestMessage: input.message,
+    recentMessageCount: Math.min(messages.length, 12),
+    safetyLevel: assessSafetyRisk(input.message).level,
+  });
+
+  return NextResponse.json({
+    reply: assistantMessage?.content ?? "我在。你可以慢慢说。",
+    routed,
+    memories: memories.slice(0, 8),
+    usedMemories: [],
+    activeThread: await ensureActiveChatThread(input.userId, input.activeThreadId),
+    threads: await listChatThreads(input.userId),
+    assistantMessageId: input.turn.assistantMessageId,
+    visionWarning: userMessage?.context.visionWarning,
+    messages,
+    replayed: true,
+  });
+}
+
+async function analyzeVisionForTurn(
   message: string,
   imageBase64?: string,
   onVisionStart?: () => void,
-) {
+): Promise<{ analysis?: VisionAnalysis; warning?: string }> {
   const trimmedImage = imageBase64?.trim();
-  if (!trimmedImage) return message;
+  if (!trimmedImage) return {};
 
   const config = await getRuntimeConfig();
-  if (!isVisionConfigured(config)) return message;
+  if (!isVisionConfigured(config)) return { warning: "识图服务尚未配置" };
 
   try {
     onVisionStart?.();
-    const description = await extractImageDescription(trimmedImage, config);
-    const userText = message.trim() || "\uff08\u7528\u6237\u6ca1\u6709\u8f93\u5165\u914d\u6587\uff09";
-
-    return [
-      "[User uploaded an image. Vision description:]",
-      description,
-      "",
-      "[User caption]",
-      userText,
-    ].join("\n");
-  } catch {
-    return message;
+    return {
+      analysis: await extractImageAnalysis({
+        imageBase64: trimmedImage,
+        userQuestion: message,
+        config,
+      }),
+    };
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "";
+    if (code === "VISION_INVALID_IMAGE") return { warning: "图片格式不受支持" };
+    if (code === "VISION_IMAGE_TOO_LARGE") return { warning: "图片处理后仍然过大" };
+    if (code === "VISION_NOT_CONFIGURED") return { warning: "识图服务尚未配置" };
+    return { warning: "识图服务暂时不可用" };
   }
 }
 
@@ -303,20 +470,61 @@ const CLIENT_NETWORK_FALLBACK =
 async function recoverUnsyncedClientMessages(
   userId: string,
   threadId: string,
-  serverMessages: Array<{ role: "user" | "assistant"; content: string; createdAt: string }>,
-  clientRecentMessages: Array<{ role: "user" | "assistant"; content: string }>,
-) {
-  if (clientRecentMessages.length === 0) return [] as Array<{
+  serverMessages: Array<{
+    id: string;
     role: "user" | "assistant";
     content: string;
+    context?: ChatMessageContext;
+    createdAt: string;
+  }>,
+  clientRecentMessages: Array<{ id?: string; role: "user" | "assistant"; content: string }>,
+  recoveryClientTurnId?: string,
+) {
+  if (clientRecentMessages.length === 0) return [] as Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    context?: ChatMessageContext;
     createdAt: string;
   }>;
 
+  if (recoveryClientTurnId) {
+    const recoveryTurn = await getChatTurn(userId, recoveryClientTurnId);
+    if (recoveryTurn) {
+      const userAlreadyPersisted = serverMessages.some(
+        (message) => message.id === recoveryTurn.userMessageId,
+      );
+      if (userAlreadyPersisted) return [];
+
+      const recoveredUserMessage = [...clientRecentMessages]
+        .reverse()
+        .find(
+          (message) =>
+            message.role === "user" &&
+            message.content.trim().length > 0 &&
+            message.content.trim() !== CLIENT_NETWORK_FALLBACK,
+        );
+      if (!recoveredUserMessage) return [];
+
+      const persisted = await appendChatMessages(userId, threadId, [
+        {
+          id: recoveryTurn.userMessageId,
+          turnId: recoveryTurn.id,
+          role: "user",
+          content: recoveredUserMessage.content,
+        },
+      ]);
+      return persisted.filter((message) => message.id === recoveryTurn.userMessageId);
+    }
+  }
+
   const serverTail = serverMessages.map((message) => ({
+    id: message.id,
     role: message.role,
     content: normalizeClientVisibleMessage(message.role, message.content),
   }));
   const clientTail = clientRecentMessages.slice(-maxRecentClientMessages).map((message) => ({
+    id: message.id,
     role: message.role,
     content: normalizeClientVisibleMessage(message.role, message.content).slice(
       0,
@@ -349,20 +557,24 @@ async function recoverUnsyncedClientMessages(
     })
     .slice(-maxRecoveredClientMessages)
     .map((message) => ({
+      id: message.id,
       role: message.role,
       content: message.content,
     }));
 
   if (missing.length === 0) {
     return [] as Array<{
+      id: string;
       role: "user" | "assistant";
       content: string;
+      context?: ChatMessageContext;
       createdAt: string;
     }>;
   }
 
   const persisted = await appendChatMessages(userId, threadId, missing);
-  return persisted.slice(-missing.length);
+  const missingIds = new Set(missing.map((message) => message.id).filter(Boolean));
+  return persisted.filter((message) => missingIds.size === 0 || missingIds.has(message.id));
 }
 
 function normalizeClientVisibleMessage(role: "user" | "assistant", content: string) {
@@ -374,6 +586,18 @@ function latestAssistantMessageId(messages: Array<{ role: "user" | "assistant"; 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message.role === "assistant") return message.id;
+  }
+
+  return undefined;
+}
+
+function latestMessageId(
+  messages: Array<{ role: "user" | "assistant"; id: string }>,
+  role: "user" | "assistant",
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === role) return message.id;
   }
 
   return undefined;

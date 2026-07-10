@@ -24,13 +24,14 @@ const setupSchema = z.object({
 
 const visionConfigSchema = z.object({
   visionApiKey: z.string().max(500).optional().or(z.literal("")),
+  clearVisionApiKey: z.boolean().optional(),
   visionBaseUrl: z.string().url().default("https://generativelanguage.googleapis.com/v1beta/openai/"),
   visionModelName: z.string().min(1).max(160).default("gemini-3.1-pro-preview"),
 });
 
 export async function GET(request: Request) {
   const config = await getRuntimeConfig();
-  const canReadSecrets =
+  const canReadConfig =
     !config.setupComplete || (await isValidRuntimeSession(getSessionCookie(request)));
 
   return NextResponse.json({
@@ -40,9 +41,12 @@ export async function GET(request: Request) {
       deepseekBaseUrl: config.deepseekBaseUrl,
       siliconFlowBaseUrl: config.siliconFlowBaseUrl,
       siliconFlowRerankModel: config.siliconFlowRerankModel,
-      visionApiKey: canReadSecrets ? config.visionApiKey : "",
-      visionBaseUrl: config.visionBaseUrl,
-      visionModelName: config.visionModelName,
+      visionApiKey: "",
+      visionConfigured: canReadConfig && Boolean(config.visionApiKey),
+      visionApiKeyHint:
+        canReadConfig && config.visionApiKey ? `••••${config.visionApiKey.slice(-4)}` : "",
+      visionBaseUrl: canReadConfig ? config.visionBaseUrl : "",
+      visionModelName: canReadConfig ? config.visionModelName : "",
       realityCountryCode: config.realityCountryCode,
     },
   });
@@ -71,7 +75,9 @@ export async function PATCH(request: Request) {
   return NextResponse.json({
     ok: true,
     defaults: {
-      visionApiKey: config.visionApiKey,
+      visionApiKey: "",
+      visionConfigured: Boolean(config.visionApiKey),
+      visionApiKeyHint: config.visionApiKey ? `••••${config.visionApiKey.slice(-4)}` : "",
       visionBaseUrl: config.visionBaseUrl,
       visionModelName: config.visionModelName,
     },

@@ -105,6 +105,7 @@ type ChatStreamEvent =
       memories: MemoryRecord[];
       usedMemories?: MemoryRecord[];
       assistantMessageId?: string;
+      visionWarning?: string;
       messages: StoredChatMessage[];
     }
   | { type: "error"; error: string };
@@ -140,6 +141,33 @@ type UsagePayload = {
   recent: UsageRecord[];
 };
 
+type SyncChange = {
+  cursor: string;
+  entity: "thread" | "message" | "memory" | "memory_settings" | "letter" | "usage";
+  entityId: string;
+  operation: "upsert" | "delete";
+  occurredAt: string;
+};
+
+type SyncSnapshotPayload = {
+  mode: "snapshot";
+  cursor: string;
+  activeThread: ChatThread;
+  threads: ChatThread[];
+  messages: StoredChatMessage[];
+  memories: MemoryRecord[];
+  memorySettings: { enabled: boolean; revision: number };
+  letters: TimeboxLetter[];
+  usage: UsagePayload;
+};
+
+type SyncChangesPayload = {
+  mode: "changes";
+  cursor: string;
+  hasMore: boolean;
+  changes: SyncChange[];
+};
+
 type TimeboxLetter = {
   id: string;
   userId: string;
@@ -156,6 +184,8 @@ type SelectedImage = {
 
 type VisionSettings = {
   visionApiKey: string;
+  visionConfigured: boolean;
+  visionApiKeyHint: string;
   visionBaseUrl: string;
   visionModelName: string;
 };
@@ -178,8 +208,9 @@ type TabState = {
 
 type ClientRecoveryState = {
   threadId?: string;
+  clientTurnId?: string;
   createdAt: number;
-  messages: Array<Pick<Message, "role" | "content">>;
+  messages: Array<Pick<Message, "id" | "role" | "content">>;
 };
 
 const storageKey = "treehole-chat-state-v1";
@@ -187,6 +218,7 @@ const tabStateStorageKey = "treehole-chat-tab-state-v1";
 const clientRecoveryStorageKey = "treehole-chat-client-recovery-v1";
 const peerSyncStorageKey = "treehole-chat-peer-sync-v1";
 const authSyncStorageKey = "treehole-chat-auth-sync-v1";
+const syncCursorStorageKey = "treehole-chat-sync-cursor-v1";
 const peerSyncChannelName = "treehole-chat-sync";
 const proactiveGreetingStoragePrefix = "treehole-proactive-greeting-v1";
 const proactiveGreetingThresholdMs = 8 * 60 * 60 * 1000;
@@ -324,6 +356,7 @@ export function ChatShell() {
   const [isAddingImport, setIsAddingImport] = useState(false);
   const [isMaintainingMemories, setIsMaintainingMemories] = useState(false);
   const [memoryEnabled, setMemoryEnabledState] = useState(true);
+  const [memorySettingsRevision, setMemorySettingsRevision] = useState(1);
   const [temperature, setTemperature] = useState(0.72);
   const [routeLabel, setRouteLabel] = useState("自动");
   const [chatStatus, setChatStatus] = useState("");
@@ -338,6 +371,8 @@ export function ChatShell() {
   const [selectedLetterId, setSelectedLetterId] = useState<string | null>(null);
   const [visionSettings, setVisionSettings] = useState<VisionSettings>({
     visionApiKey: "",
+    visionConfigured: false,
+    visionApiKeyHint: "",
     visionBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
     visionModelName: "gemini-3.1-pro-preview",
   });
@@ -358,6 +393,7 @@ export function ChatShell() {
   const threadRefreshSeqRef = useRef(0);
   const clientRecoveryRef = useRef<ClientRecoveryState | null>(null);
   const peerSyncChannelRef = useRef<BroadcastChannel | null>(null);
+  const syncCursorRef = useRef("0");
   const syncForegroundStateRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
   const refreshThreadStateRef = useRef<(threadId?: string) => Promise<boolean>>(async () => false);
   const refreshLettersRef = useRef<() => Promise<void>>(async () => {});
@@ -367,6 +403,7 @@ export function ChatShell() {
   useEffect(() => {
     queueMicrotask(() => {
       clientRecoveryRef.current = readClientRecoveryState();
+      syncCursorRef.current = safeGetStorageItem("local", syncCursorStorageKey) ?? "0";
 
       const raw = safeGetStorageItem("local", storageKey);
       if (raw) {
@@ -388,6 +425,7 @@ export function ChatShell() {
       }
 
       setLoaded(true);
+      runBackgroundTask(pullIncrementalSync());
       runBackgroundTask(refreshMemories());
       runBackgroundTask(refreshUsage());
       runBackgroundTask(refreshVisionSettings());
@@ -471,18 +509,15 @@ export function ChatShell() {
       pendingForegroundSyncRef.current = false;
 
       try {
-        const threadSynced = await refreshThreadStateRef.current(activeThreadIdRef.current);
-        if (!threadSynced) {
+        const synced = await pullIncrementalSync();
+        if (!synced) {
           pendingForegroundSyncRef.current = true;
           return;
         }
 
-        await Promise.allSettled([
-          refreshMemories(),
-          refreshUsage(),
-          refreshLettersRef.current(),
-          refreshVisionSettings(),
-        ]);
+        // Vision settings are intentionally excluded from the device sync log
+        // because it contains provider credentials. Refresh the masked view.
+        await refreshVisionSettings();
       } catch {
         pendingForegroundSyncRef.current = true;
         // Foreground sync is opportunistic; the next focus/online/interval event will retry.
@@ -609,7 +644,7 @@ export function ChatShell() {
       messages
         .filter((message) => message.id !== "hello")
         .slice(-10)
-        .map((message) => ({ role: message.role, content: message.content })),
+        .map((message) => ({ id: message.id, role: message.role, content: message.content })),
     [messages],
   );
 
@@ -654,12 +689,18 @@ export function ChatShell() {
     }
 
     const visibleMessages = baseMessages.map((message) => ({
+      id: message.id,
       role: message.role,
       content: message.content,
     }));
-    const alreadySynced = recovery.messages.every((message) =>
+    const recoverableMessages = recovery.messages.filter(
+      (message) => message.content !== networkFallbackMessage,
+    );
+    const alreadySynced = recoverableMessages.every((message) =>
       visibleMessages.some(
-        (visible) => visible.role === message.role && visible.content === message.content,
+        (visible) =>
+          visible.id === message.id ||
+          (visible.role === message.role && visible.content === message.content),
       ),
     );
 
@@ -678,9 +719,7 @@ export function ChatShell() {
         ),
       ),
       ...recovery.messages.map((message) => ({
-        id: createClientId(),
-        role: message.role,
-        content: message.content,
+        ...message,
       })),
     ];
   }
@@ -765,11 +804,12 @@ export function ChatShell() {
 
     const data = (await response.json()) as {
       memories: MemoryRecord[];
-      settings: { enabled: boolean };
+      settings: { enabled: boolean; revision?: number };
     };
 
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    if (typeof data.settings.revision === "number") setMemorySettingsRevision(data.settings.revision);
   }
 
   async function refreshThreadState(threadId?: string): Promise<boolean> {
@@ -811,6 +851,60 @@ export function ChatShell() {
     setRecentUsage(data.recent ?? []);
   }
 
+  async function pullIncrementalSync(): Promise<boolean> {
+    const initialCursor = syncCursorRef.current || "0";
+    let cursor = initialCursor;
+    let loops = 0;
+
+    while (loops < 4) {
+      loops += 1;
+      const query = cursor !== "0" ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const response = await fetch(`/api/sync${query}`, { cache: "no-store" });
+      if (handleAuthRedirect(response)) return false;
+      if (!response.ok) return false;
+
+      const data = (await response.json()) as SyncSnapshotPayload | SyncChangesPayload;
+      if (data.mode === "snapshot") {
+        const nextActiveThread = sanitizeChatThread(data.activeThread);
+        setThreads(sanitizeChatThreads(data.threads));
+        setActiveThread(nextActiveThread);
+        setMessages(
+          applyClientRecoveryMessages(
+            toDisplayMessages(data.messages.filter((message) => message.threadId === nextActiveThread.id)),
+            nextActiveThread.id,
+          ),
+        );
+        setMemories(data.memories);
+        setMemoryEnabledState(data.memorySettings.enabled);
+        setMemorySettingsRevision(data.memorySettings.revision);
+        setLetters(data.letters);
+        setUsage(data.usage.summary);
+        setRecentUsage(data.usage.recent ?? []);
+        cursor = data.cursor;
+        break;
+      }
+
+      const affected = new Set(data.changes.map((change) => change.entity));
+      const refreshes: Promise<unknown>[] = [];
+      if (affected.has("thread") || affected.has("message")) {
+        refreshes.push(refreshThreadStateRef.current(activeThreadIdRef.current));
+      }
+      if (affected.has("memory") || affected.has("memory_settings")) refreshes.push(refreshMemories());
+      if (affected.has("letter")) refreshes.push(refreshLettersRef.current());
+      if (affected.has("usage")) refreshes.push(refreshUsage());
+
+      const results = await Promise.allSettled(refreshes);
+      if (results.some((result) => result.status === "rejected" || result.value === false)) return false;
+
+      cursor = data.cursor;
+      if (!data.hasMore) break;
+    }
+
+    syncCursorRef.current = cursor;
+    safeSetStorageItem("local", syncCursorStorageKey, cursor);
+    return true;
+  }
+
   async function refreshVisionSettings() {
     const response = await fetch("/api/setup");
     if (handleAuthRedirect(response)) return;
@@ -822,6 +916,8 @@ export function ChatShell() {
 
     setVisionSettings((current) => ({
       visionApiKey: data.defaults?.visionApiKey ?? current.visionApiKey,
+      visionConfigured: data.defaults?.visionConfigured ?? current.visionConfigured,
+      visionApiKeyHint: data.defaults?.visionApiKeyHint ?? current.visionApiKeyHint,
       visionBaseUrl: data.defaults?.visionBaseUrl ?? current.visionBaseUrl,
       visionModelName: data.defaults?.visionModelName ?? current.visionModelName,
     }));
@@ -834,7 +930,7 @@ export function ChatShell() {
     }));
   }
 
-  async function saveVisionSettings() {
+  async function saveVisionSettings(clearVisionApiKey = false) {
     if (isSavingVisionSettings) return;
 
     setIsSavingVisionSettings(true);
@@ -843,7 +939,12 @@ export function ChatShell() {
       const response = await fetch("/api/setup", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(visionSettings),
+        body: JSON.stringify({
+          visionApiKey: visionSettings.visionApiKey,
+          clearVisionApiKey,
+          visionBaseUrl: visionSettings.visionBaseUrl,
+          visionModelName: visionSettings.visionModelName,
+        }),
       });
 
       if (handleAuthRedirect(response)) return;
@@ -853,12 +954,14 @@ export function ChatShell() {
       if (data.defaults) {
         setVisionSettings((current) => ({
           visionApiKey: data.defaults?.visionApiKey ?? current.visionApiKey,
+          visionConfigured: data.defaults?.visionConfigured ?? current.visionConfigured,
+          visionApiKeyHint: data.defaults?.visionApiKeyHint ?? current.visionApiKeyHint,
           visionBaseUrl: data.defaults?.visionBaseUrl ?? current.visionBaseUrl,
           visionModelName: data.defaults?.visionModelName ?? current.visionModelName,
         }));
       }
       notifyPeerTabs("vision-settings");
-      showNotice("Vision 配置已保存。");
+      showNotice(clearVisionApiKey ? "Vision Key 已清除。" : "Vision 配置已保存。");
     } catch {
       showNotice("Vision 配置没有保存成功。");
     } finally {
@@ -908,21 +1011,30 @@ export function ChatShell() {
   }
 
   async function deleteMemory(memoryId: string) {
+    const expectedRevision = memories.find((memory) => memory.id === memoryId)?.revision;
     const response = await fetchForAction(
       "/api/memories",
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete", memoryId }),
+        body: JSON.stringify({ action: "delete", memoryId, expectedRevision }),
       },
       "记忆没有删除成功。",
     );
     if (!response) return;
 
     if (handleAuthRedirect(response)) return;
-    if (!response.ok) return;
-    const data = (await response.json()) as { memories: MemoryRecord[] };
+    if (!response.ok) {
+      if (response.status === 409) {
+        showNotice("这条记忆已在另一台设备更新，已刷新最新内容。");
+        runBackgroundTask(refreshMemories());
+      }
+      return;
+    }
+    const data = (await response.json()) as { memories: MemoryRecord[]; settings: { enabled: boolean; revision?: number } };
     setMemories(data.memories);
+    setMemoryEnabledState(data.settings.enabled);
+    if (typeof data.settings.revision === "number") setMemorySettingsRevision(data.settings.revision);
     setSelectedMemoryId((current) => (current === memoryId ? null : current));
     notifyPeerTabs("memory-delete");
   }
@@ -931,6 +1043,7 @@ export function ChatShell() {
     memoryId: string,
     update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
   ) {
+    const expectedRevision = memories.find((memory) => memory.id === memoryId)?.revision;
     const response = await fetchForAction(
       "/api/memories",
       {
@@ -940,6 +1053,7 @@ export function ChatShell() {
           action: "update",
           memoryId,
           ...update,
+          expectedRevision,
         }),
       },
       "记忆没有保存成功。",
@@ -948,16 +1062,22 @@ export function ChatShell() {
 
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
+      if (response.status === 409) {
+        showNotice("这条记忆已在另一台设备更新，已刷新最新内容。");
+        runBackgroundTask(refreshMemories());
+        return;
+      }
       showNotice("记忆没有保存成功。");
       return;
     }
 
     const data = (await response.json()) as {
       memories: MemoryRecord[];
-      settings: { enabled: boolean };
+      settings: { enabled: boolean; revision?: number };
     };
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    if (typeof data.settings.revision === "number") setMemorySettingsRevision(data.settings.revision);
     notifyPeerTabs("memory-update");
     showNotice("记忆已更新。");
   }
@@ -1226,6 +1346,7 @@ export function ChatShell() {
     try {
       await fetch("/api/session", { method: "DELETE" });
     } finally {
+      clearClientRecoveryState();
       notifyAuthTabs("logout");
       redirectToLogin();
     }
@@ -1240,7 +1361,7 @@ export function ChatShell() {
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "setEnabled", enabled }),
+        body: JSON.stringify({ action: "setEnabled", enabled, expectedRevision: memorySettingsRevision }),
       },
       "记忆开关没有同步成功。",
     );
@@ -1252,14 +1373,19 @@ export function ChatShell() {
     if (handleAuthRedirect(response)) return;
     if (!response.ok) {
       setMemoryEnabledState(previousEnabled);
+      if (response.status === 409) {
+        showNotice("记忆开关已在另一台设备变更，已刷新最新状态。");
+        runBackgroundTask(refreshMemories());
+      }
       return;
     }
     const data = (await response.json()) as {
       memories: MemoryRecord[];
-      settings: { enabled: boolean };
+      settings: { enabled: boolean; revision?: number };
     };
     setMemories(data.memories);
     setMemoryEnabledState(data.settings.enabled);
+    if (typeof data.settings.revision === "number") setMemorySettingsRevision(data.settings.revision);
     notifyPeerTabs("memory-enabled");
   }
 
@@ -1501,6 +1627,7 @@ export function ChatShell() {
           setActiveThread(sanitizeChatThread(data.activeThread));
           setThreads(sanitizeChatThreads(data.threads));
           setMemories(data.memories);
+          if (data.visionWarning) showNotice(data.visionWarning);
           setMessages((current) =>
             mergeStreamedAssistantMessages({
               serverMessages: data.messages,
@@ -1634,6 +1761,8 @@ export function ChatShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           threadId: activeThread?.id,
+          clientTurnId: userMessage.id,
+          recoveryClientTurnId: clientRecoveryRef.current?.clientTurnId,
           message: content,
           tier,
           memoryEnabled,
@@ -1645,6 +1774,15 @@ export function ChatShell() {
       });
 
       if (handleAuthRedirect(response)) return;
+      if (response.status === 409) {
+        const conflict = (await response.json().catch(() => null)) as { code?: string } | null;
+        if (conflict?.code === "TURN_IN_PROGRESS") {
+          showNotice("这条消息正在另一处处理中，稍后会自动同步。");
+          pendingForegroundSyncRef.current = true;
+          runBackgroundTask(refreshThreadState(activeThread.id));
+          return;
+        }
+      }
       if (!response.ok) throw new Error("request failed");
 
       await readChatStream(response, {
@@ -1687,11 +1825,12 @@ export function ChatShell() {
       });
     } catch {
       const recoveryMessages: ClientRecoveryState["messages"] = [
-        { role: "user", content: userMessage.content },
-        { role: "assistant", content: networkFallbackMessage },
+        userMessage,
+        { ...assistantMessage, content: networkFallbackMessage },
       ];
       saveClientRecoveryState({
         threadId: activeThread.id,
+        clientTurnId: userMessage.id,
         createdAt: Date.now(),
         messages: recoveryMessages,
       });
@@ -2133,7 +2272,11 @@ export function ChatShell() {
             <PanelLabel>Vision</PanelLabel>
             <div className="mt-3 space-y-3">
               <SettingsInput
-                label="Vision Key"
+                label={
+                  visionSettings.visionConfigured
+                    ? `Vision Key（已配置 ${visionSettings.visionApiKeyHint}，留空表示保留）`
+                    : "Vision Key"
+                }
                 value={visionSettings.visionApiKey}
                 onChange={(value) => updateVisionSetting("visionApiKey", value)}
                 type="password"
@@ -2158,6 +2301,16 @@ export function ChatShell() {
                 <Check size={15} />
                 {isSavingVisionSettings ? "保存中" : "保存 Vision 配置"}
               </button>
+              {visionSettings.visionConfigured ? (
+                <button
+                  type="button"
+                  onClick={() => void saveVisionSettings(true)}
+                  disabled={isSavingVisionSettings}
+                  className="inline-flex h-9 w-full items-center justify-center text-xs text-clay transition hover:text-clay-deep disabled:opacity-50"
+                >
+                  清除 Vision Key
+                </button>
+              ) : null}
             </div>
           </section>
 
@@ -3578,14 +3731,16 @@ function readClientRecoveryState(): ClientRecoveryState | null {
     const parsed = JSON.parse(raw) as Partial<ClientRecoveryState>;
     const messages = Array.isArray(parsed.messages)
       ? parsed.messages.filter(
-          (message): message is Pick<Message, "role" | "content"> =>
+          (message): message is Pick<Message, "id" | "role" | "content"> =>
             (message?.role === "user" || message?.role === "assistant") &&
+            typeof message.id === "string" &&
             typeof message.content === "string" &&
             message.content.trim().length > 0,
         )
       : [];
     const recovery: ClientRecoveryState = {
       threadId: typeof parsed.threadId === "string" ? parsed.threadId : undefined,
+      clientTurnId: typeof parsed.clientTurnId === "string" ? parsed.clientTurnId : undefined,
       createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : 0,
       messages,
     };

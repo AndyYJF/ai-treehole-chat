@@ -13,6 +13,7 @@ import {
   isValidRuntimeSession,
   runtimeCookieSecure,
 } from "@/lib/auth-runtime";
+import { requestRateLimitKey, takeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -31,7 +32,23 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const body = loginSchema.parse(await request.json());
+  const rateLimit = takeRateLimit(requestRateLimitKey(request, "login"), {
+    limit: 10,
+    windowMs: 15 * 60_000,
+  });
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many login attempts. Please wait before trying again." },
+      { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } },
+    );
+  }
+
+  let body: z.infer<typeof loginSchema>;
+  try {
+    body = loginSchema.parse(await request.json());
+  } catch {
+    return NextResponse.json({ error: "Invalid login request" }, { status: 400 });
+  }
   const valid = await isValidRuntimeAccessToken(body.token);
 
   if (!valid) {

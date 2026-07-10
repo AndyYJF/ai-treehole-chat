@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { getPostgresPool } from "./postgres";
+import { ensureSyncTrigger } from "./sync";
 
 export type ModelUsage = {
   promptTokens?: number | null;
@@ -92,23 +93,32 @@ export async function recordModelUsage(
   );
 }
 
-export async function listModelUsage(userId: string, limit = 30): Promise<ModelUsageRecord[]> {
+export async function listModelUsage(userId: string, limit?: number): Promise<ModelUsageRecord[]> {
   const pool = getPostgresPool();
+  const safeLimit = limit == null ? null : Math.max(1, Math.min(limit, 10_000));
 
   if (!pool) {
-    return [...(inMemoryUsage.get(userId) ?? [])].slice(-limit).reverse();
+    const records = [...(inMemoryUsage.get(userId) ?? [])];
+    return (safeLimit == null ? records : records.slice(-safeLimit)).reverse();
   }
 
   await ensureModelUsageSchema();
   const { rows } = await pool.query(
-    `select id, user_id, provider, operation, model, streamed, success, status_code, latency_ms,
-      prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens,
-      prompt_cache_miss_tokens, reasoning_tokens, error_message, created_at
-    from model_usage_events
-    where user_id = $1
-    order by created_at desc
-    limit $2`,
-    [userId, limit],
+    safeLimit == null
+      ? `select id, user_id, provider, operation, model, streamed, success, status_code, latency_ms,
+          prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens,
+          prompt_cache_miss_tokens, reasoning_tokens, error_message, created_at
+        from model_usage_events
+        where user_id = $1
+        order by created_at desc`
+      : `select id, user_id, provider, operation, model, streamed, success, status_code, latency_ms,
+          prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens,
+          prompt_cache_miss_tokens, reasoning_tokens, error_message, created_at
+        from model_usage_events
+        where user_id = $1
+        order by created_at desc
+        limit $2`,
+    safeLimit == null ? [userId] : [userId, safeLimit],
   );
 
   return rows.map(usageFromRow);
@@ -214,6 +224,7 @@ async function ensureModelUsageSchema() {
   `).then(() => undefined);
 
   await schemaReady;
+  await ensureSyncTrigger("model_usage_events", "usage");
 }
 
 function usageFromRow(row: Record<string, unknown>): ModelUsageRecord {

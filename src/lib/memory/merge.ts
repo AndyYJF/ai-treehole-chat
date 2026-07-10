@@ -3,8 +3,10 @@ import type { MemoryRecord } from "./types";
 const similarityThreshold = 0.72;
 const strictSimilarityThreshold = 0.86;
 const negationPenalty = 0.2;
-const decayRatePerDay = 0.9;
-const decayableTypes = new Set<MemoryRecord["type"]>(["affect", "episodic", "semantic"]);
+const decayRatePerDay: Partial<Record<MemoryRecord["type"], number>> = {
+  affect: 0.92,
+  episodic: 0.985,
+};
 const strictMergeTypes = new Set<MemoryRecord["type"]>(["preference", "boundary"]);
 const negationPatterns = [
   "不喜欢",
@@ -51,7 +53,10 @@ export function mergeMemoryRecord(
   incoming: MemoryRecord,
   options: { applyDecay?: boolean } = {},
 ): MemoryRecord {
-  const shouldApplyDecay = options.applyDecay ?? true;
+  // Decay is a retrieval-time score, not a destructive mutation. Keeping this
+  // opt-in preserves compatibility for callers that explicitly need a scored
+  // snapshot without repeatedly shrinking the stored importance.
+  const shouldApplyDecay = options.applyDecay ?? false;
   const decayedBase = shouldApplyDecay ? applyMemoryDecay(base) : base;
   const decayedIncoming = shouldApplyDecay ? applyMemoryDecay(incoming) : incoming;
 
@@ -70,26 +75,31 @@ export function mergeMemoryRecord(
   };
 }
 
-export function maintainMemoryRecords(memories: MemoryRecord[], limit = 80): MemoryRecord[] {
+export function maintainMemoryRecords(memories: MemoryRecord[]): MemoryRecord[] {
   const maintained: MemoryRecord[] = [];
 
   for (const memory of memories) {
-    const decayed = applyMemoryDecay(memory);
-    const target = findMergeTarget(maintained, decayed);
+    const target = findMergeTarget(maintained, memory);
 
-    if (target) {
+    // Never collapse two user-confirmed records in the background: they may
+    // look similar to a lexical matcher while carrying deliberately distinct
+    // wording or boundaries. Candidate ingestion can still merge unconfirmed
+    // duplicates with their provenance intact.
+    if (target && !target.userConfirmed && !memory.userConfirmed) {
       const index = maintained.findIndex((item) => item.id === target.id);
-      maintained[index] = mergeMemoryRecord(target, decayed, { applyDecay: false });
+      maintained[index] = mergeMemoryRecord(target, memory, { applyDecay: false });
       continue;
     }
 
     maintained.push({
-      ...decayed,
-      content: decayed.content.trim(),
+      ...memory,
+      content: memory.content.trim(),
     });
   }
 
-  return maintained.sort(sortMemoryForMaintenance).slice(0, limit);
+  // Maintenance is non-destructive. Retrieval applies its own bounded ranking;
+  // silently dropping low-ranked records here made old data irrecoverable.
+  return maintained.sort(sortMemoryForMaintenance);
 }
 
 export function memorySimilarity(a: string, b: string, type?: MemoryRecord["type"]): number {
@@ -123,15 +133,35 @@ export function memorySimilarity(a: string, b: string, type?: MemoryRecord["type
 }
 
 export function applyMemoryDecay(memory: MemoryRecord, now = new Date()): MemoryRecord {
-  if (!decayableTypes.has(memory.type)) return memory;
-
-  const ageInDays = memoryAgeInDays(memory, now);
-  if (ageInDays <= 0) return memory;
-
   return {
     ...memory,
-    importance: clampImportance(Math.round(memory.importance * decayRatePerDay ** ageInDays)),
+    importance: effectiveMemoryImportance(memory, now),
   };
+}
+
+export function effectiveMemoryImportance(memory: MemoryRecord, now = new Date()): number {
+  if (memory.userConfirmed) return memory.importance;
+
+  const rate = decayRatePerDay[memory.type];
+  if (rate == null) return memory.importance;
+
+  const ageInDays = memoryAgeInDays(memory, now);
+  if (ageInDays <= 0) return memory.importance;
+
+  return clampImportance(Math.round(memory.importance * rate ** ageInDays));
+}
+
+export function isMemoryActive(
+  memory: Pick<MemoryRecord, "validFrom" | "validUntil">,
+  now = new Date(),
+): boolean {
+  const nowTime = now.getTime();
+  const validFrom = parseMemoryTimestamp(memory.validFrom);
+  const validUntil = parseMemoryTimestamp(memory.validUntil);
+
+  if (validFrom != null && validFrom > nowTime) return false;
+  if (validUntil != null && validUntil <= nowTime) return false;
+  return true;
 }
 
 function normalizeMemoryText(text: string): string {
@@ -253,7 +283,8 @@ function sortMemoryForMaintenance(a: MemoryRecord, b: MemoryRecord): number {
   const typeDelta = typeOrder.indexOf(a.type) - typeOrder.indexOf(b.type);
 
   if (typeDelta !== 0) return typeDelta;
-  if (b.importance !== a.importance) return b.importance - a.importance;
+  const importanceDelta = effectiveMemoryImportance(b) - effectiveMemoryImportance(a);
+  if (importanceDelta !== 0) return importanceDelta;
   if (b.lastSeenAt !== a.lastSeenAt) return b.lastSeenAt.localeCompare(a.lastSeenAt);
   return a.id.localeCompare(b.id);
 }

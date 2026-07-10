@@ -11,6 +11,7 @@ import { streamDeepSeek } from "@/lib/deepseek";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import type { MemoryRecord } from "@/lib/memory/types";
+import { selectProactiveMemories } from "@/lib/memory/policy";
 import { stripInternalMetadata } from "@/lib/prompt";
 import { buildRealityContext, type RealityContextStatus } from "@/lib/reality-context";
 import { getServerUserId } from "@/lib/server-user";
@@ -96,6 +97,7 @@ function createGreetingStream(
 
       try {
         const repository = getMemoryRepository();
+        const memorySettings = await repository.getMemorySettings(input.userId);
         const recentMessages = input.recentMessages.slice(-8);
         const realityContext = await buildRealityContext({
           userId: input.userId,
@@ -105,7 +107,9 @@ function createGreetingStream(
             send({ type: "status", status });
           },
         });
-        const allMemories = await repository.listMemories(input.userId);
+        const allMemories = memorySettings.enabled
+          ? await repository.listMemories(input.userId)
+          : [];
         const greetingMemories = selectGreetingMemories(allMemories);
         const promptMessages = [
           {
@@ -191,8 +195,7 @@ function createGreetingStream(
 }
 
 function selectGreetingMemories(memories: MemoryRecord[]) {
-  return memories
-    .filter((memory) => memory.type === "affect" || memory.type === "episodic")
+  return selectProactiveMemories(memories, 12)
     .sort((left, right) => {
       if (right.importance !== left.importance) return right.importance - left.importance;
       return new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime();

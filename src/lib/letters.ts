@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { getPostgresPool } from "./postgres";
+import { ensureSyncTrigger } from "./sync";
 
 export type TimeboxLetter = {
   id: string;
@@ -121,6 +122,7 @@ async function ensureLetterSchema() {
   `).then(() => undefined);
 
   await schemaReady;
+  await ensureSyncTrigger("timebox_letters", "letter");
 }
 
 function sortLetters(left: TimeboxLetter, right: TimeboxLetter) {

@@ -6,6 +6,7 @@ import { maybeMaintainMemories } from "@/lib/memory/maintenance";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import { memoryTypeSchema, sensitivitySchema } from "@/lib/memory/types";
 import { getServerUserId } from "@/lib/server-user";
+import { requestRateLimitKey, takeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -39,6 +40,16 @@ export async function POST(request: Request) {
   try {
     const body = importRequestSchema.parse(await request.json());
     const userId = getServerUserId();
+    const rateLimit = takeRateLimit(requestRateLimitKey(request, `memory-import:${body.action}`, userId), {
+      limit: body.action === "analyze" ? 6 : 24,
+      windowMs: body.action === "analyze" ? 10 * 60_000 : 10 * 60_000,
+    });
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: "Too many import requests. Please wait and try again.", code: "RATE_LIMITED" },
+        { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } },
+      );
+    }
 
     if (body.action === "analyze") {
       return NextResponse.json(await analyzeImportedConversation({

@@ -30,9 +30,9 @@
 }
 
 @theme inline {
-  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+  --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB",
     "Noto Sans SC", "Microsoft YaHei", sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
 }
 
 :root {

@@ -18,15 +18,14 @@ const memoryCandidateJsonSchema = z.object({
 
 const preferencePatterns = ["我喜欢", "我不喜欢", "我希望", "我更希望", "别", "不要"];
 const affectPatterns = ["难过", "焦虑", "烦", "累", "崩溃", "开心", "失落", "害怕"];
-const safetyPatterns = ["不想活", "自杀", "伤害自己", "伤害别人", "死了算了"];
 
 export async function extractMemoryCandidates(input: {
   userId: string;
   messageId: string;
   userMessage: string;
 }): Promise<MemoryCandidate[]> {
-  const modelCandidates = await extractWithModel(input);
-  if (modelCandidates.length > 0) return modelCandidates;
+  const modelResult = await extractWithModel(input);
+  if (modelResult.handled) return modelResult.candidates;
 
   return extractWithRules(input);
 }
@@ -42,39 +41,51 @@ async function extractWithModel(input: {
   userId: string;
   messageId: string;
   userMessage: string;
-}): Promise<MemoryCandidate[]> {
+}): Promise<{ handled: boolean; candidates: MemoryCandidate[] }> {
   const today = toUtc8IsoString(new Date());
-  const json = await callDeepSeekJson({
-    userId: input.userId,
-    operation: "memory_extract",
-    model: "deepseek-v4-flash",
-    temperature: 0.05,
-    messages: [
-      {
-        role: "system",
-        content: [
-          "你是长期陪伴聊天应用的记忆抽取器。",
-          "只抽取用户明确表达的长期偏好、边界、事实、事件、情绪模式和安全风险。",
-          "不要把猜测、诊断、模型建议写入记忆。",
-          "输出严格 JSON，不要解释。",
-          "schema: {\"memories\":[{\"type\":\"semantic|episodic|procedural|affect|safety|preference|boundary\",\"content\":\"string\",\"confidence\":0-1,\"importance\":0-100,\"sensitivity\":\"normal|sensitive|private\",\"validFrom\":\"ISO string or null\",\"validUntil\":\"ISO string or null\"}]}",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: `当前时间：${today}\n用户消息：${input.userMessage}`,
-      },
-    ],
-  });
+  let json: unknown | null;
+
+  try {
+    json = await callDeepSeekJson({
+      userId: input.userId,
+      operation: "memory_extract",
+      model: "deepseek-v4-flash",
+      temperature: 0.05,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是长期陪伴聊天应用的记忆抽取器。",
+            "只抽取用户在本条消息中明确表达、且未来仍有帮助的长期偏好、边界、事实、事件和稳定模式。",
+            "不要把图片识别结果、外部资料、猜测、诊断、模型建议、比喻或一次性情绪写入记忆。",
+            "如果没有值得长期保留的内容，返回空 memories；空数组是有效结果。",
+            "输出严格 JSON，不要解释。",
+            "schema: {\"memories\":[{\"type\":\"semantic|episodic|procedural|affect|safety|preference|boundary\",\"content\":\"string\",\"confidence\":0-1,\"importance\":0-100,\"sensitivity\":\"normal|sensitive|private\",\"validFrom\":\"ISO string or null\",\"validUntil\":\"ISO string or null\"}]}",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: `当前时间：${today}\n用户原始文本：${input.userMessage}`,
+        },
+      ],
+    });
+  } catch {
+    return { handled: false, candidates: [] };
+  }
+
+  if (json == null) return { handled: false, candidates: [] };
 
   const parsed = memoryCandidateJsonSchema.safeParse(json);
-  if (!parsed.success) return [];
+  if (!parsed.success) return { handled: false, candidates: [] };
 
-  return parsed.data.memories.slice(0, 10).map((candidate) => ({
-    ...candidate,
-    validFrom: candidate.validFrom ?? today,
-    sourceMessageIds: [input.messageId],
-  }));
+  return {
+    handled: true,
+    candidates: parsed.data.memories.slice(0, 10).map((candidate) => ({
+      ...candidate,
+      validFrom: candidate.validFrom ?? today,
+      sourceMessageIds: [input.messageId],
+    })),
+  };
 }
 
 function extractWithRules(input: {
@@ -85,19 +96,6 @@ function extractWithRules(input: {
   const candidates: MemoryCandidate[] = [];
 
   if (text.length < 8) return candidates;
-
-  if (safetyPatterns.some((pattern) => text.includes(pattern))) {
-    candidates.push({
-      type: "safety",
-      content: toShortMemory(text),
-      confidence: 0.65,
-      importance: 92,
-      sensitivity: "private",
-      sourceMessageIds: [input.messageId],
-      validFrom: new Date().toISOString(),
-      validUntil: null,
-    });
-  }
 
   if (preferencePatterns.some((pattern) => text.includes(pattern))) {
     candidates.push({

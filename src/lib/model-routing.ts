@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { SafetyRiskLevel } from "./safety";
 
 export const modelTierSchema = z.enum(["auto", "light", "balanced", "deep"]);
 
@@ -33,6 +34,7 @@ export function routeModel(input: {
   userTier: ModelTier;
   latestMessage: string;
   recentMessageCount: number;
+  safetyLevel?: SafetyRiskLevel;
 }): RoutedModel {
   if (input.userTier === "light") {
     return {
@@ -63,14 +65,21 @@ export function routeModel(input: {
 
   const message = input.latestMessage.trim();
   const hasDeepSignal = deepTalkSignals.some((signal) => message.includes(signal));
-  const needsDeepModel = message.length > 180 || hasDeepSignal || input.recentMessageCount > 18;
+  const needsDeepModel =
+    message.length > 180 ||
+    hasDeepSignal ||
+    input.safetyLevel === "concern" ||
+    input.safetyLevel === "urgent";
 
   if (needsDeepModel) {
     return {
       tier: "deep",
       label: "自动: 深谈",
       model: "deepseek-v4-pro",
-      reason: "自动判断为复杂倾诉或长文本场景",
+      reason:
+        input.safetyLevel === "urgent"
+          ? "检测到需要优先处理的安全风险"
+          : "自动判断为复杂倾诉或长文本场景",
     };
   }
 
@@ -88,4 +97,3 @@ export const tierOptions: Array<{ value: ModelTier; label: string; hint: string 
   { value: "balanced", label: "均衡", hint: "日常聊天" },
   { value: "deep", label: "深谈", hint: "复杂复盘" },
 ];
-

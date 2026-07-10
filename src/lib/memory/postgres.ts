@@ -1,6 +1,8 @@
 import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
 import { getPostgresPool } from "../postgres";
+import { ensureSyncTrigger } from "../sync";
+import { SyncConflictError } from "../sync-conflict";
 import type { MemoryCandidate, MemoryRecord } from "./types";
 import { findMergeTarget, maintainMemoryRecords, mergeMemoryRecord } from "./merge";
 import { sortMemoryForPrompt } from "./store";
@@ -8,7 +10,7 @@ import type { MemoryRepository } from "./repository";
 
 let schemaReady: Promise<void> | null = null;
 
-const baselineMemories: Array<Omit<MemoryRecord, "id" | "userId" | "createdAt" | "lastSeenAt">> = [
+const baselineMemories: Array<Omit<MemoryRecord, "id" | "userId" | "revision" | "createdAt" | "lastSeenAt">> = [
   {
     type: "procedural",
     content: "用户偏好安静、少说教、先回应感受，再给选择。",
@@ -45,9 +47,28 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
 
       const { rows } = await pool.query(
         `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
-          user_confirmed, valid_from, valid_until, created_at, last_seen_at
+          user_confirmed, revision, valid_from, valid_until, created_at, last_seen_at
         from memories
-        where user_id = $1 and valid_until is null`,
+        where user_id = $1
+          and (valid_from is null or valid_from <= now())
+          and (valid_until is null or valid_until > now())`,
+        [userId],
+      );
+
+      return rows.map(memoryFromRow).sort(sortMemoryForPrompt);
+    },
+
+    async listAllMemories(userId) {
+      await ensureInitialized(userId);
+
+      const pool = getPostgresPool();
+      if (!pool) return [];
+
+      const { rows } = await pool.query(
+        `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
+          user_confirmed, revision, valid_from, valid_until, created_at, last_seen_at
+        from memories
+        where user_id = $1`,
         [userId],
       );
 
@@ -67,41 +88,52 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
       return this.listMemories(userId);
     },
 
-    async confirmMemory(userId, memoryId) {
+    async confirmMemory(userId, memoryId, expectedRevision) {
       await ensureInitialized(userId);
 
       const pool = getPostgresPool();
       if (!pool) return this.listMemories(userId);
 
-      await pool.query(
+      const result = await pool.query(
         `update memories
-        set user_confirmed = true, confidence = greatest(confidence, 0.9), last_seen_at = now()
-        where user_id = $1 and id = $2`,
-        [userId, memoryId],
+        set user_confirmed = true,
+          confidence = greatest(confidence, 0.9),
+          revision = revision + 1,
+          last_seen_at = now()
+        where user_id = $1 and id = $2
+          and ($3::integer is null or revision = $3)`,
+        [userId, memoryId, expectedRevision ?? null],
       );
+      if (expectedRevision != null && result.rowCount === 0) throw new SyncConflictError();
 
       return this.listMemories(userId);
     },
 
-    async updateMemory(userId, memoryId, update) {
+    async updateMemory(userId, memoryId, update, expectedRevision) {
       await ensureInitialized(userId);
 
       const pool = getPostgresPool();
       if (!pool) return this.listMemories(userId);
 
       await withTransaction(async (client) => {
-        await updateMemoryRecord(client, userId, memoryId, update);
+        await updateMemoryRecord(client, userId, memoryId, update, expectedRevision);
       });
 
       return this.listMemories(userId);
     },
 
-    async deleteMemory(userId, memoryId) {
+    async deleteMemory(userId, memoryId, expectedRevision) {
       await ensureInitialized(userId);
       const pool = getPostgresPool();
       if (!pool) return this.listMemories(userId);
 
-      await pool.query("delete from memories where user_id = $1 and id = $2", [userId, memoryId]);
+      const result = await pool.query(
+        `delete from memories
+        where user_id = $1 and id = $2
+          and ($3::integer is null or revision = $3)`,
+        [userId, memoryId, expectedRevision ?? null],
+      );
+      if (expectedRevision != null && result.rowCount === 0) throw new SyncConflictError();
       return this.listMemories(userId);
     },
 
@@ -123,6 +155,8 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
         const maintainedIds = new Set(maintained.map((memory) => memory.id));
 
         for (const memory of maintained) {
+          const original = existing.find((item) => item.id === memory.id);
+          if (original && memoryHasSamePersistence(original, memory)) continue;
           await writeMergedMemory(client, userId, memory);
         }
 
@@ -130,6 +164,9 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
           if (maintainedIds.has(memory.id)) continue;
           await client.query("delete from memories where user_id = $1 and id = $2", [userId, memory.id]);
         }
+
+        // Expired records are excluded from retrieval, but remain exportable and
+        // auditable. A maintenance pass must not erase user data by itself.
       });
 
       return this.listMemories(userId);
@@ -139,27 +176,30 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
       await ensureInitialized(userId);
 
       const pool = getPostgresPool();
-      if (!pool) return { enabled: true };
+      if (!pool) return { enabled: true, revision: 1 };
 
-      const { rows } = await pool.query("select enabled from user_memory_settings where user_id = $1", [userId]);
-      return { enabled: rows[0]?.enabled ?? true };
+      const { rows } = await pool.query("select enabled, revision from user_memory_settings where user_id = $1", [userId]);
+      return { enabled: rows[0]?.enabled ?? true, revision: Number(rows[0]?.revision ?? 1) };
     },
 
-    async setMemoryEnabled(userId, enabled) {
+    async setMemoryEnabled(userId, enabled, expectedRevision) {
       await ensureInitialized(userId);
 
       const pool = getPostgresPool();
-      if (!pool) return { enabled };
+      if (!pool) return { enabled, revision: 1 };
 
-      await pool.query(
-        `insert into user_memory_settings (user_id, enabled, updated_at)
-        values ($1, $2, now())
+      const { rows } = await pool.query(
+        `insert into user_memory_settings (user_id, enabled, revision, updated_at)
+        values ($1, $2, 1, now())
         on conflict (user_id)
-        do update set enabled = excluded.enabled, updated_at = now()`,
-        [userId, enabled],
+        do update set enabled = excluded.enabled, revision = user_memory_settings.revision + 1, updated_at = now()
+        where $3::integer is null or user_memory_settings.revision = $3
+        returning enabled, revision`,
+        [userId, enabled, expectedRevision ?? null],
       );
+      if (expectedRevision != null && rows.length === 0) throw new SyncConflictError();
 
-      return { enabled };
+      return { enabled: rows[0]?.enabled ?? enabled, revision: Number(rows[0]?.revision ?? 1) };
     },
   };
 }
@@ -216,6 +256,7 @@ async function ensureSchema() {
     create table if not exists user_memory_settings (
       user_id text primary key,
       enabled boolean not null default true,
+      revision integer not null default 1,
       updated_at timestamptz not null default now()
     );
 
@@ -229,11 +270,15 @@ async function ensureSchema() {
       sensitivity text not null default 'normal' check (sensitivity in ('normal', 'sensitive', 'private')),
       source_message_ids jsonb not null default '[]'::jsonb,
       user_confirmed boolean not null default false,
+      revision integer not null default 1,
       valid_from timestamptz,
       valid_until timestamptz,
       created_at timestamptz not null default now(),
       last_seen_at timestamptz not null default now()
     );
+
+    alter table user_memory_settings add column if not exists revision integer not null default 1;
+    alter table memories add column if not exists revision integer not null default 1;
 
     create unique index if not exists memories_user_type_content_key
       on memories (user_id, type, content);
@@ -241,6 +286,11 @@ async function ensureSchema() {
     create index if not exists memories_user_valid_idx
       on memories (user_id, valid_until, importance desc, last_seen_at desc);
   `);
+
+  await Promise.all([
+    ensureSyncTrigger("memories", "memory"),
+    ensureSyncTrigger("user_memory_settings", "memory_settings"),
+  ]);
 }
 
 async function upsertMemoryCandidate(client: PoolClient, userId: string, candidate: MemoryCandidate) {
@@ -274,6 +324,7 @@ async function upsertMemoryCandidate(client: PoolClient, userId: string, candida
         from jsonb_array_elements_text(memories.source_message_ids || excluded.source_message_ids) as source(value)
       ),
       user_confirmed = memories.user_confirmed or excluded.user_confirmed,
+      revision = memories.revision + 1,
       valid_from = coalesce(least(memories.valid_from, excluded.valid_from), memories.valid_from, excluded.valid_from),
       valid_until = excluded.valid_until,
       last_seen_at = excluded.last_seen_at`,
@@ -299,10 +350,12 @@ async function updateMemoryRecord(
   userId: string,
   memoryId: string,
   update: Pick<MemoryRecord, "type" | "content" | "importance" | "sensitivity">,
+  expectedRevision?: number,
 ) {
   const existing = await listValidMemories(client, userId);
   const current = existing.find((memory) => memory.id === memoryId);
   if (!current) return;
+  if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
 
   const now = new Date().toISOString();
   const incoming: MemoryRecord = {
@@ -319,11 +372,17 @@ async function updateMemoryRecord(
 
   if (target) {
     await writeMergedMemory(client, userId, mergeMemoryRecord(target, incoming));
-    await client.query("delete from memories where user_id = $1 and id = $2", [userId, memoryId]);
+    const deleted = await client.query(
+      `delete from memories
+      where user_id = $1 and id = $2
+        and ($3::integer is null or revision = $3)`,
+      [userId, memoryId, expectedRevision ?? null],
+    );
+    if (expectedRevision != null && deleted.rowCount === 0) throw new SyncConflictError();
     return;
   }
 
-  await client.query(
+  const updated = await client.query(
     `update memories
     set type = $3,
       content = $4,
@@ -331,18 +390,23 @@ async function updateMemoryRecord(
       sensitivity = $6,
       user_confirmed = true,
       confidence = greatest(confidence, 0.9),
+      revision = revision + 1,
       last_seen_at = now()
-    where user_id = $1 and id = $2`,
-    [userId, memoryId, incoming.type, incoming.content, incoming.importance, incoming.sensitivity],
+    where user_id = $1 and id = $2
+      and ($7::integer is null or revision = $7)`,
+    [userId, memoryId, incoming.type, incoming.content, incoming.importance, incoming.sensitivity, expectedRevision ?? null],
   );
+  if (expectedRevision != null && updated.rowCount === 0) throw new SyncConflictError();
 }
 
 async function listValidMemories(client: PoolClient, userId: string): Promise<MemoryRecord[]> {
   const { rows } = await client.query(
     `select id, user_id, type, content, confidence, importance, sensitivity, source_message_ids,
-      user_confirmed, valid_from, valid_until, created_at, last_seen_at
+      user_confirmed, revision, valid_from, valid_until, created_at, last_seen_at
     from memories
-    where user_id = $1 and valid_until is null`,
+    where user_id = $1
+      and (valid_from is null or valid_from <= now())
+      and (valid_until is null or valid_until > now())`,
     [userId],
   );
 
@@ -359,6 +423,7 @@ async function writeMergedMemory(client: PoolClient, userId: string, memory: Mem
       sensitivity = $7,
       source_message_ids = $8,
       user_confirmed = $9,
+      revision = revision + 1,
       valid_from = $10,
       valid_until = $11,
       created_at = $12,
@@ -393,6 +458,7 @@ function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, n
     sensitivity: candidate.sensitivity,
     sourceMessageIds: candidate.sourceMessageIds,
     userConfirmed: false,
+    revision: 1,
     validFrom: candidate.validFrom,
     validUntil: candidate.validUntil,
     createdAt: now,
@@ -430,9 +496,26 @@ function memoryFromRow(row: Record<string, unknown>): MemoryRecord {
     sensitivity: row.sensitivity as MemoryRecord["sensitivity"],
     sourceMessageIds: Array.isArray(row.source_message_ids) ? row.source_message_ids.map(String) : [],
     userConfirmed: Boolean(row.user_confirmed),
+    revision: Math.max(1, Number(row.revision ?? 1)),
     validFrom: row.valid_from ? new Date(String(row.valid_from)).toISOString() : null,
     validUntil: row.valid_until ? new Date(String(row.valid_until)).toISOString() : null,
     createdAt: new Date(String(row.created_at)).toISOString(),
     lastSeenAt: new Date(String(row.last_seen_at)).toISOString(),
   };
+}
+
+function memoryHasSamePersistence(left: MemoryRecord, right: MemoryRecord) {
+  return (
+    left.type === right.type &&
+    left.content.trim() === right.content.trim() &&
+    left.confidence === right.confidence &&
+    left.importance === right.importance &&
+    left.sensitivity === right.sensitivity &&
+    left.userConfirmed === right.userConfirmed &&
+    left.validFrom === right.validFrom &&
+    left.validUntil === right.validUntil &&
+    left.createdAt === right.createdAt &&
+    left.lastSeenAt === right.lastSeenAt &&
+    JSON.stringify([...left.sourceMessageIds].sort()) === JSON.stringify([...right.sourceMessageIds].sort())
+  );
 }

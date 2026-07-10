@@ -3,21 +3,32 @@ import { callDeepSeek, type ChatMessage } from "./deepseek";
 import { getMemoryRepository } from "./memory/repository";
 import { extractMemoryCandidates } from "./memory/extract";
 import { selectRelevantMemories } from "./memory/rerank";
+import { selectRetrievableMemories, selectStableSystemMemories } from "./memory/policy";
 import type { MemoryCandidate, MemoryRecord } from "./memory/types";
 import { routeModel, type ModelTier, type RoutedModel } from "./model-routing";
 import { recordModelUsage } from "./model-usage";
 import { buildChatMessages } from "./prompt";
 import { buildRealityContext, type RealityContextStatus } from "./reality-context";
+import { assessSafetyRisk, formatSafetyContext, type SafetyAssessment } from "./safety";
+import type { VisionAnalysis } from "./vision";
 
-type RecentMessage = { role: "user" | "assistant"; content: string; createdAt?: string };
+type RecentMessage = {
+  role: "user" | "assistant";
+  content: string;
+  createdAt?: string;
+  context?: { vision?: VisionAnalysis; visionWarning?: string };
+};
 
 type ChatEngineInput = {
   userId: string;
+  messageId?: string;
   message: string;
   tier: ModelTier;
   memoryEnabled: boolean;
   temperature: number;
   recentMessages: RecentMessage[];
+  visionAnalysis?: VisionAnalysis;
+  visionWarning?: string;
   onRealityStatus?: (status: RealityContextStatus) => void;
 };
 
@@ -37,39 +48,46 @@ const ChatTurnState = Annotation.Root({
   memoryEnabled: Annotation<boolean>(),
   temperature: Annotation<number>(),
   recentMessages: Annotation<RecentMessage[]>(),
+  visionAnalysis: Annotation<VisionAnalysis | undefined>(),
+  visionWarning: Annotation<string | undefined>(),
   messageId: Annotation<string>(),
   routed: Annotation<RoutedModel>(),
   memories: Annotation<MemoryRecord[]>(),
   systemMemories: Annotation<MemoryRecord[]>(),
   realityContext: Annotation<string>(),
   promptMessages: Annotation<ChatMessage[]>(),
+  safetyAssessment: Annotation<SafetyAssessment>(),
   reply: Annotation<string>(),
   memoryCandidates: Annotation<MemoryCandidate[]>(),
   updatedMemories: Annotation<MemoryRecord[]>(),
 });
 
-async function prepareTurn() {
+async function prepareTurn(state: typeof ChatTurnState.State) {
   return {
-    messageId: `msg-${Date.now()}`,
+    messageId: state.messageId || `msg-${Date.now()}`,
   };
 }
 
 async function routeTurn(state: typeof ChatTurnState.State) {
+  const safetyAssessment = assessSafetyRisk(state.message);
   return {
+    safetyAssessment,
     routed: routeModel({
       userTier: state.tier,
       latestMessage: state.message,
       recentMessageCount: state.recentMessages.length,
+      safetyLevel: safetyAssessment.level,
     }),
   };
 }
 
 async function retrieveMemories(state: typeof ChatTurnState.State) {
   const repository = getMemoryRepository();
-  const memories = state.memoryEnabled ? await repository.listMemories(state.userId) : [];
+  const allMemories = state.memoryEnabled ? await repository.listMemories(state.userId) : [];
+  const memories = selectRetrievableMemories(allMemories);
 
   return {
-    systemMemories: memories,
+    systemMemories: selectStableSystemMemories(allMemories),
     memories: await selectRelevantMemories({
       query: state.message,
       memories,
@@ -90,6 +108,9 @@ async function composePrompt(state: typeof ChatTurnState.State) {
       memories: state.systemMemories,
       relevantMemories: state.memories,
       realityContext,
+      safetyContext: formatSafetyContext(state.safetyAssessment),
+      visionAnalysis: state.visionAnalysis,
+      visionWarning: state.visionWarning,
       threadSummary: "",
       recentMessages: state.recentMessages.slice(-12),
       latestMessage: state.message,
@@ -158,11 +179,12 @@ const chatTurnGraph = new StateGraph(ChatTurnState)
 export async function runChatTurn(input: ChatEngineInput) {
   const result = await chatTurnGraph.invoke({
     ...input,
-    messageId: "",
+    messageId: input.messageId ?? "",
     memories: [],
     systemMemories: [],
     realityContext: "",
     promptMessages: [],
+    safetyAssessment: assessSafetyRisk(input.message),
     reply: "",
     memoryCandidates: [],
     updatedMemories: [],
@@ -176,17 +198,21 @@ export async function runChatTurn(input: ChatEngineInput) {
 }
 
 export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedChatTurn> {
-  const messageId = `msg-${Date.now()}`;
+  const messageId = input.messageId ?? `msg-${Date.now()}`;
+  const safetyAssessment = assessSafetyRisk(input.message);
   const routed = routeModel({
     userTier: input.tier,
     latestMessage: input.message,
     recentMessageCount: input.recentMessages.length,
+    safetyLevel: safetyAssessment.level,
   });
   const repository = getMemoryRepository();
-  const systemMemories = input.memoryEnabled ? await repository.listMemories(input.userId) : [];
+  const allMemories = input.memoryEnabled ? await repository.listMemories(input.userId) : [];
+  const systemMemories = selectStableSystemMemories(allMemories);
+  const retrievableMemories = selectRetrievableMemories(allMemories);
   const memories = await selectRelevantMemories({
     query: input.message,
-    memories: systemMemories,
+    memories: retrievableMemories,
   });
   const realityContext = await buildRealityContext({
     userId: input.userId,
@@ -198,6 +224,9 @@ export async function prepareChatTurn(input: ChatEngineInput): Promise<PreparedC
     memories: systemMemories,
     relevantMemories: memories,
     realityContext,
+    safetyContext: formatSafetyContext(safetyAssessment),
+    visionAnalysis: input.visionAnalysis,
+    visionWarning: input.visionWarning,
     threadSummary: "",
     recentMessages: input.recentMessages.slice(-12),
     latestMessage: input.message,
@@ -222,21 +251,31 @@ export async function finishChatTurn(input: {
   memories: MemoryRecord[];
 }) {
   const start = Date.now();
-  const memoryCandidates = input.memoryEnabled
-    ? await extractMemoryCandidates({
-        userId: input.userId,
-        messageId: input.messageId,
-        userMessage: input.message,
-      })
-    : [];
+  let memoryCandidates: MemoryCandidate[] = [];
+
+  try {
+    memoryCandidates = input.memoryEnabled
+      ? await extractMemoryCandidates({
+          userId: input.userId,
+          messageId: input.messageId,
+          userMessage: input.message,
+        })
+      : [];
+  } catch {
+    memoryCandidates = [];
+  }
   await recordMemoryExtractResult(input.userId, memoryCandidates.length, start);
 
   if (!input.memoryEnabled || memoryCandidates.length === 0) {
     return input.memories.slice(0, 8);
   }
 
-  const repository = getMemoryRepository();
-  return (await repository.addMemoryCandidates(input.userId, memoryCandidates)).slice(0, 8);
+  try {
+    const repository = getMemoryRepository();
+    return (await repository.addMemoryCandidates(input.userId, memoryCandidates)).slice(0, 8);
+  } catch {
+    return input.memories.slice(0, 8);
+  }
 }
 
 async function recordMemoryExtractResult(userId: string, candidateCount: number, start: number) {
