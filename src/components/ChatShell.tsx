@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import {
   FormEvent,
   type ClipboardEvent as ReactClipboardEvent,
@@ -39,14 +40,6 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import {
-  Background,
-  Controls,
-  ReactFlow,
-  type Edge,
-  type Node,
-  type NodeMouseHandler,
-} from "@xyflow/react";
 import { tierOptions, type ModelTier } from "@/lib/model-routing";
 import type { MemoryRecord, MemoryType } from "@/lib/memory/types";
 import { type ThemePreference, useThemePreference } from "@/lib/theme";
@@ -320,6 +313,14 @@ const sensitivityLabels: Record<ImportedMemoryCandidate["sensitivity"], string> 
 };
 
 const memoryTypeOrder = Object.keys(memoryTypeLabels) as MemoryType[];
+
+const LazyMemoryGraph = dynamic(
+  () => import("./MemoryGraph").then((module) => module.MemoryGraph),
+  {
+    ssr: false,
+    loading: () => <div className="h-[420px] animate-pulse rounded-2xl border border-line bg-mist" />,
+  },
+);
 
 const themeOptions: Array<{
   value: ThemePreference;
@@ -650,6 +651,7 @@ export function ChatShell() {
 
   const isFreshThread = messages.length === 1 && messages[0]?.id === "hello";
   const hasUnreadLetters = letters.some((letter) => !letter.isRead);
+  const selectedGraphMemory = memories.find((memory) => memory.id === selectedMemoryId) ?? null;
 
   function showNotice(message: string) {
     setNotice(message);
@@ -2595,13 +2597,22 @@ export function ChatShell() {
           ) : (
             <>
               {memoryView === "graph" ? (
-                <MemoryGraph
-                  memories={memories}
-                  selectedMemoryId={selectedMemoryId}
-                  onSelectMemory={setSelectedMemoryId}
-                  onUpdateMemory={(memoryId, update) => void updateMemory(memoryId, update)}
-                  onDeleteMemory={(memoryId) => void deleteMemory(memoryId)}
-                />
+                <div className="space-y-3">
+                  <LazyMemoryGraph
+                    memories={memories}
+                    selectedMemoryId={selectedMemoryId}
+                    onSelectMemory={setSelectedMemoryId}
+                  />
+                  {selectedGraphMemory ? (
+                    <MemoryCard
+                      memory={selectedGraphMemory}
+                      onUpdate={(update) => void updateMemory(selectedGraphMemory.id, update)}
+                      onDelete={() => void deleteMemory(selectedGraphMemory.id)}
+                    />
+                  ) : (
+                    <p className="px-1 text-xs text-ink-faint">点一个节点查看或删除。</p>
+                  )}
+                </div>
               ) : (
                 memories.map((memory) => (
                   <MemoryCard
@@ -2830,6 +2841,9 @@ function MemoryActions({
   );
 }
 
+/* Legacy graph implementation retained temporarily for source-history context.
+ * The rendered graph now lives in ./MemoryGraph and is lazy-loaded so the
+ * heavy XYFlow dependency is not part of the initial chat bundle.
 function MemoryGraph({
   memories,
   selectedMemoryId,
@@ -3165,6 +3179,7 @@ function getMemoryGraphBounds(nodes: Node[]) {
     { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: 0, maxY: 0 },
   );
 }
+*/
 
 type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
