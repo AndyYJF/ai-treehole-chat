@@ -38,34 +38,14 @@ export async function GET(request: Request) {
   const requestedCursor = url.searchParams.get("cursor");
   const parsedCursor = parseCursor(requestedCursor);
 
-  // Calling each repository first also performs its safe additive schema
-  // migration and installs the corresponding change trigger.
-  const repository = getMemoryRepository();
-  const [activeThread, threads, messages, memories, memorySettings, letters, usageSummary, usageRecent] =
-    await Promise.all([
-      ensureActiveChatThread(userId),
-      listChatThreads(userId),
-      listAllChatMessages(userId),
-      repository.listMemories(userId),
-      repository.getMemorySettings(userId),
-      listLetters(userId),
-      getModelUsageSummary(userId),
-      listModelUsage(userId, 30),
-    ]);
-
   if (!hasPostgresSync() || !requestedCursor || parsedCursor === "0") {
     const cursor = hasPostgresSync() ? await getLatestSyncCursor(userId) : "0";
+    const snapshot = await loadSyncSnapshot(userId);
     return NextResponse.json(
       {
         mode: "snapshot",
         cursor,
-        activeThread,
-        threads,
-        messages,
-        memories,
-        memorySettings,
-        letters,
-        usage: { summary: usageSummary, recent: usageRecent },
+        ...snapshot,
       },
       { headers: syncHeaders },
     );
@@ -77,18 +57,13 @@ export async function GET(request: Request) {
   // A cursor ahead of the server is from a reset/restore and must not silently
   // suppress updates. Return a fresh snapshot instead.
   if (compareSyncCursors(parsedCursor, latestCursor) > 0) {
+    const snapshot = await loadSyncSnapshot(userId);
     return NextResponse.json(
       {
         mode: "snapshot",
         reset: true,
         cursor: latestCursor,
-        activeThread,
-        threads,
-        messages,
-        memories,
-        memorySettings,
-        letters,
-        usage: { summary: usageSummary, recent: usageRecent },
+        ...snapshot,
       },
       { headers: syncHeaders },
     );
@@ -102,4 +77,31 @@ export async function GET(request: Request) {
     },
     { headers: syncHeaders },
   );
+}
+
+async function loadSyncSnapshot(userId: string) {
+  // These reads also run the repositories' additive schema initialization and
+  // install their durable change-log triggers on a new deployment.
+  const repository = getMemoryRepository();
+  const [activeThread, threads, messages, memories, memorySettings, letters, usageSummary, usageRecent] =
+    await Promise.all([
+      ensureActiveChatThread(userId),
+      listChatThreads(userId),
+      listAllChatMessages(userId),
+      repository.listMemories(userId),
+      repository.getMemorySettings(userId),
+      listLetters(userId),
+      getModelUsageSummary(userId),
+      listModelUsage(userId, 30),
+    ]);
+
+  return {
+    activeThread,
+    threads,
+    messages,
+    memories,
+    memorySettings,
+    letters,
+    usage: { summary: usageSummary, recent: usageRecent },
+  };
 }

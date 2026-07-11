@@ -195,7 +195,7 @@ export async function POST(request: Request) {
           activeThread.id,
           await summarizeThreadTitle({
             userId,
-            userMessage: input.displayMessage,
+            userMessage: input.message,
             assistantReply,
           }),
         )
@@ -348,7 +348,7 @@ function createChatStream(
               turnInput.threadId,
               await summarizeThreadTitle({
                 userId: turnInput.userId,
-                userMessage: turnInput.displayMessage,
+                userMessage: turnInput.message,
                 assistantReply,
               }),
             )
