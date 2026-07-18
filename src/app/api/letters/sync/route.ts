@@ -1,17 +1,14 @@
 import { NextResponse } from "next/server";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { callDeepSeek } from "@/lib/deepseek";
+import { isLetterDue, minimumLetterMemoryCount, selectLetterMemories } from "@/lib/letter-policy";
 import { createLetter, listLetters } from "@/lib/letters";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import type { MemoryRecord } from "@/lib/memory/types";
-import { selectProactiveMemories } from "@/lib/memory/policy";
 import { getServerUserId } from "@/lib/server-user";
 
 export const runtime = "nodejs";
 
-const letterWindowDays = 14;
-const syncThresholdDays = 7;
-const minimumMemoryCount = 3;
 const syncLocks = new Map<string, number>();
 
 export async function POST(request: Request) {
@@ -32,7 +29,7 @@ export async function POST(request: Request) {
     const existingLetters = await listLetters(userId);
     const lastLetter = existingLetters[0] ?? null;
 
-    if (!shouldCreateLetter(lastLetter?.createdAt ?? null)) {
+    if (!isLetterDue(lastLetter?.createdAt ?? null)) {
       return new Response(null, { status: 204 });
     }
 
@@ -43,7 +40,7 @@ export async function POST(request: Request) {
     }
     const memories = selectLetterMemories(await repository.listMemories(userId));
 
-    if (memories.length < minimumMemoryCount) {
+    if (memories.length < minimumLetterMemoryCount) {
       return new Response(null, { status: 204 });
     }
 
@@ -82,30 +79,6 @@ export async function POST(request: Request) {
   } finally {
     syncLocks.delete(userId);
   }
-}
-
-function shouldCreateLetter(lastLetterAt: string | null) {
-  if (!lastLetterAt) return true;
-
-  const lastTime = new Date(lastLetterAt).getTime();
-  if (Number.isNaN(lastTime)) return true;
-
-  return Date.now() - lastTime >= syncThresholdDays * 24 * 60 * 60 * 1000;
-}
-
-function selectLetterMemories(memories: MemoryRecord[]) {
-  const since = Date.now() - letterWindowDays * 24 * 60 * 60 * 1000;
-
-  return selectProactiveMemories(memories, 36)
-    .filter((memory) => {
-      const timestamp = new Date(memory.lastSeenAt || memory.createdAt).getTime();
-      return !Number.isNaN(timestamp) && timestamp >= since;
-    })
-    .sort((left, right) => {
-      if (right.importance !== left.importance) return right.importance - left.importance;
-      return new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime();
-    })
-    .slice(0, 18);
 }
 
 function buildLetterSystemPrompt() {

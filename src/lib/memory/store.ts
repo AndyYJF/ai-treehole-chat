@@ -14,7 +14,7 @@ const seedMemories: MemoryRecord[] = [
     importance: 86,
     sensitivity: "normal",
     sourceMessageIds: [],
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: null,
     validUntil: null,
@@ -30,7 +30,7 @@ const seedMemories: MemoryRecord[] = [
     importance: 78,
     sensitivity: "normal",
     sourceMessageIds: [],
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: null,
     validUntil: null,
@@ -76,7 +76,7 @@ export function addMemoryCandidates(userId: string, candidates: MemoryCandidate[
       ...candidate,
       id: `mem-${Date.now()}-${index}`,
       userId,
-      userConfirmed: false,
+      userConfirmed: true,
       revision: 1,
       createdAt: now,
       lastSeenAt: now,
@@ -86,24 +86,6 @@ export function addMemoryCandidates(userId: string, candidates: MemoryCandidate[
   const merged = mergeMemoryRecords([...existing, ...created]);
   memoryStore.set(userId, merged);
   return merged;
-}
-
-export function confirmMemory(userId: string, memoryId: string): MemoryRecord[] {
-  const now = new Date().toISOString();
-  const updated = listMemories(userId).map((memory) => {
-    if (memory.id !== memoryId) return memory;
-
-    return {
-      ...memory,
-      userConfirmed: true,
-      confidence: Math.max(memory.confidence, 0.9),
-      revision: memory.revision + 1,
-      lastSeenAt: now,
-    };
-  });
-
-  memoryStore.set(userId, updated);
-  return updated;
 }
 
 export function updateMemory(userId: string, memoryId: string, update: MemoryUpdate): MemoryRecord[] {

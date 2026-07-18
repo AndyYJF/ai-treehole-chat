@@ -12,7 +12,7 @@ function memory(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
     importance: 80,
     sensitivity: "normal",
     sourceMessageIds: ["message-1"],
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: null,
     validUntil: null,
@@ -23,34 +23,33 @@ function memory(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
 }
 
 describe("memory prompt policy", () => {
-  it("only places confirmed, non-private stable memories in the system prefix", () => {
+  it("places non-private stable memories in the system prefix", () => {
     const memories = [
       memory({ id: "candidate" }),
-      memory({ id: "confirmed", userConfirmed: true }),
-      memory({ id: "private", userConfirmed: true, sensitivity: "private" }),
-      memory({ id: "event", userConfirmed: true, type: "episodic" }),
+      memory({ id: "private", sensitivity: "private" }),
+      memory({ id: "event", type: "episodic" }),
     ];
 
-    expect(selectStableSystemMemories(memories).map((item) => item.id)).toEqual(["confirmed"]);
+    expect(selectStableSystemMemories(memories).map((item) => item.id)).toEqual(["candidate"]);
   });
 
   it("filters low-confidence candidates from retrieval", () => {
     const memories = [
       memory({ id: "low", confidence: 0.2 }),
       memory({ id: "enough", confidence: 0.7 }),
-      memory({ id: "confirmed", confidence: 0.1, userConfirmed: true }),
+      memory({ id: "previously-confirmed", confidence: 0.1, userConfirmed: true }),
     ];
 
-    expect(selectRetrievableMemories(memories).map((item) => item.id)).toEqual(["enough", "confirmed"]);
+    expect(selectRetrievableMemories(memories).map((item) => item.id)).toEqual(["enough"]);
   });
 
-  it("requires confirmation and normal sensitivity for proactive use", () => {
+  it("requires normal sensitivity and an affect or episodic type for proactive use", () => {
     const memories = [
-      memory({ id: "confirmed-affect", type: "affect", userConfirmed: true }),
-      memory({ id: "private-affect", type: "affect", userConfirmed: true, sensitivity: "private" }),
-      memory({ id: "candidate-event", type: "episodic" }),
+      memory({ id: "affect", type: "affect" }),
+      memory({ id: "private-affect", type: "affect", sensitivity: "private" }),
+      memory({ id: "event", type: "episodic", userConfirmed: false }),
     ];
 
-    expect(selectProactiveMemories(memories, 10).map((item) => item.id)).toEqual(["confirmed-affect"]);
+    expect(selectProactiveMemories(memories, 10).map((item) => item.id)).toEqual(["affect", "event"]);
   });
 });

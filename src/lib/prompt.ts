@@ -23,7 +23,7 @@ const BASE_SYSTEM_PROMPT = `
 - 只使用系统提供的记忆数据，不虚构“我记得”。
 - 记忆只用于自然延续关系，不罗列或炫耀记忆。
 - 记忆与用户当前所说冲突时，以用户现在说的为准。
-- 未确认或低置信度内容必须保留不确定性。
+- 低置信度内容必须保留不确定性。
 
 安全：
 - 用户表达可能的自伤、自杀或伤害他人风险时，认真对待并保持陪伴。
@@ -65,7 +65,7 @@ export function buildChatMessages(input: {
   const systemSections = [
     BASE_SYSTEM_PROMPT,
     INTERNAL_METADATA_POLICY,
-    ["【已确认的稳定记忆数据】", memoryBlock].join("\n"),
+    ["【稳定记忆数据】", memoryBlock].join("\n"),
   ];
   if (input.threadSummary.trim()) {
     systemSections.push(["【当前会话摘要数据】", input.threadSummary.trim()].join("\n"));
@@ -128,7 +128,6 @@ function formatRelevantMemoryBlock(memories: MemoryRecord[]): string {
 function formatMemoryData(memory: MemoryRecord): string {
   return JSON.stringify({
     type: memory.type,
-    confirmed: memory.userConfirmed,
     importance: memory.importance,
     observedAt: formatContextTime(memory.createdAt),
     content: memory.content,

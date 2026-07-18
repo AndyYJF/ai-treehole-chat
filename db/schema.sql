@@ -19,7 +19,7 @@ create table if not exists memories (
   importance integer not null default 50,
   sensitivity text not null default 'normal' check (sensitivity in ('normal', 'sensitive', 'private')),
   source_message_ids jsonb not null default '[]'::jsonb,
-  user_confirmed boolean not null default false,
+  user_confirmed boolean not null default true,
   revision integer not null default 1,
   valid_from timestamptz,
   valid_until timestamptz,

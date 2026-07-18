@@ -17,7 +17,7 @@ function memory(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
     importance: 80,
     sensitivity: "sensitive",
     sourceMessageIds: ["message-1"],
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: "2026-06-30T00:00:00.000Z",
     validUntil: null,
@@ -40,7 +40,6 @@ describe("memory lifecycle", () => {
     const now = new Date("2026-07-10T00:00:00.000Z");
 
     expect(effectiveMemoryImportance(memory(), now)).toBeLessThan(80);
-    expect(effectiveMemoryImportance(memory({ userConfirmed: true }), now)).toBe(80);
     expect(effectiveMemoryImportance(memory({ type: "semantic" }), now)).toBe(80);
   });
 
@@ -58,7 +57,7 @@ describe("memory lifecycle", () => {
     expect(score).toBeLessThan(0.86);
   });
 
-  it("does not silently discard or background-merge confirmed memories", () => {
+  it("merges equivalent memories during maintenance", () => {
     const first = memory({
       id: "memory-confirmed-1",
       type: "preference",
@@ -72,9 +71,6 @@ describe("memory lifecycle", () => {
       userConfirmed: true,
     });
 
-    expect(maintainMemoryRecords([first, second]).map((item) => item.id)).toEqual([
-      "memory-confirmed-1",
-      "memory-confirmed-2",
-    ]);
+    expect(maintainMemoryRecords([first, second]).map((item) => item.id)).toEqual(["memory-confirmed-1"]);
   });
 });

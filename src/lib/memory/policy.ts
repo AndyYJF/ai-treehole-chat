@@ -9,21 +9,17 @@ const stableSystemTypes = new Set<MemoryRecord["type"]>([
 
 export function selectStableSystemMemories(memories: MemoryRecord[], limit = 8) {
   return memories
-    .filter((memory) => memory.userConfirmed)
     .filter((memory) => stableSystemTypes.has(memory.type))
     .filter((memory) => memory.sensitivity !== "private")
     .slice(0, limit);
 }
 
 export function selectRetrievableMemories(memories: MemoryRecord[]) {
-  return memories.filter(
-    (memory) => memory.userConfirmed || memory.confidence >= minimumRetrievalConfidence(memory.type),
-  );
+  return memories.filter((memory) => memory.confidence >= minimumRetrievalConfidence(memory.type));
 }
 
 export function selectProactiveMemories(memories: MemoryRecord[], limit: number) {
   return memories
-    .filter((memory) => memory.userConfirmed)
     .filter((memory) => memory.sensitivity === "normal")
     .filter((memory) => memory.type === "affect" || memory.type === "episodic")
     .sort((left, right) => {

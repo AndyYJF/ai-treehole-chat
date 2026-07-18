@@ -11,11 +11,6 @@ export const runtime = "nodejs";
 
 const memoryPatchSchema = z.discriminatedUnion("action", [
   z.object({
-    action: z.literal("confirm"),
-    memoryId: z.string(),
-    expectedRevision: z.number().int().min(1).optional(),
-  }),
-  z.object({
     action: z.literal("update"),
     memoryId: z.string(),
     type: memoryTypeSchema,
@@ -61,13 +56,6 @@ export async function PATCH(request: Request) {
     const body = memoryPatchSchema.parse(await request.json());
     const userId = getServerUserId();
     const repository = getMemoryRepository();
-
-    if (body.action === "confirm") {
-      return NextResponse.json({
-        memories: await repository.confirmMemory(userId, body.memoryId, body.expectedRevision),
-        settings: await repository.getMemorySettings(userId),
-      });
-    }
 
     if (body.action === "update") {
       return NextResponse.json({

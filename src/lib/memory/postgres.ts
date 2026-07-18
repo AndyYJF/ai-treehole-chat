@@ -18,7 +18,7 @@ const baselineMemories: Array<Omit<MemoryRecord, "id" | "userId" | "revision" | 
     importance: 86,
     sensitivity: "normal",
     sourceMessageIds: [],
-    userConfirmed: false,
+    userConfirmed: true,
     validFrom: null,
     validUntil: null,
   },
@@ -29,7 +29,7 @@ const baselineMemories: Array<Omit<MemoryRecord, "id" | "userId" | "revision" | 
     importance: 78,
     sensitivity: "normal",
     sourceMessageIds: [],
-    userConfirmed: false,
+    userConfirmed: true,
     validFrom: null,
     validUntil: null,
   },
@@ -84,27 +84,6 @@ export function createPostgresMemoryRepository(connectionString: string): Memory
           await upsertMemoryCandidate(client, userId, candidate);
         }
       });
-
-      return this.listMemories(userId);
-    },
-
-    async confirmMemory(userId, memoryId, expectedRevision) {
-      await ensureInitialized(userId);
-
-      const pool = getPostgresPool();
-      if (!pool) return this.listMemories(userId);
-
-      const result = await pool.query(
-        `update memories
-        set user_confirmed = true,
-          confidence = greatest(confidence, 0.9),
-          revision = revision + 1,
-          last_seen_at = now()
-        where user_id = $1 and id = $2
-          and ($3::integer is null or revision = $3)`,
-        [userId, memoryId, expectedRevision ?? null],
-      );
-      if (expectedRevision != null && result.rowCount === 0) throw new SyncConflictError();
 
       return this.listMemories(userId);
     },
@@ -269,7 +248,7 @@ async function ensureSchema() {
       importance integer not null default 50,
       sensitivity text not null default 'normal' check (sensitivity in ('normal', 'sensitive', 'private')),
       source_message_ids jsonb not null default '[]'::jsonb,
-      user_confirmed boolean not null default false,
+      user_confirmed boolean not null default true,
       revision integer not null default 1,
       valid_from timestamptz,
       valid_until timestamptz,
@@ -279,6 +258,10 @@ async function ensureSchema() {
 
     alter table user_memory_settings add column if not exists revision integer not null default 1;
     alter table memories add column if not exists revision integer not null default 1;
+    alter table memories alter column user_confirmed set default true;
+    update memories
+    set user_confirmed = true, revision = revision + 1
+    where user_confirmed = false;
 
     create unique index if not exists memories_user_type_content_key
       on memories (user_id, type, content);
@@ -309,7 +292,7 @@ async function upsertMemoryCandidate(client: PoolClient, userId: string, candida
       id, user_id, type, content, confidence, importance, sensitivity,
       source_message_ids, user_confirmed, valid_from, valid_until, created_at, last_seen_at
     )
-    values ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10, $11, $12)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12)
     on conflict (user_id, type, content)
     do update set
       confidence = greatest(memories.confidence, excluded.confidence),
@@ -422,12 +405,12 @@ async function writeMergedMemory(client: PoolClient, userId: string, memory: Mem
       importance = $6,
       sensitivity = $7,
       source_message_ids = $8,
-      user_confirmed = $9,
+      user_confirmed = true,
       revision = revision + 1,
-      valid_from = $10,
-      valid_until = $11,
-      created_at = $12,
-      last_seen_at = $13
+      valid_from = $9,
+      valid_until = $10,
+      created_at = $11,
+      last_seen_at = $12
     where user_id = $1 and id = $2`,
     [
       userId,
@@ -438,7 +421,6 @@ async function writeMergedMemory(client: PoolClient, userId: string, memory: Mem
       memory.importance,
       memory.sensitivity,
       JSON.stringify(memory.sourceMessageIds),
-      memory.userConfirmed,
       memory.validFrom,
       memory.validUntil,
       memory.createdAt,
@@ -457,7 +439,7 @@ function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, n
     importance: candidate.importance,
     sensitivity: candidate.sensitivity,
     sourceMessageIds: candidate.sourceMessageIds,
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: candidate.validFrom,
     validUntil: candidate.validUntil,
@@ -495,7 +477,7 @@ function memoryFromRow(row: Record<string, unknown>): MemoryRecord {
     importance: Number(row.importance),
     sensitivity: row.sensitivity as MemoryRecord["sensitivity"],
     sourceMessageIds: Array.isArray(row.source_message_ids) ? row.source_message_ids.map(String) : [],
-    userConfirmed: Boolean(row.user_confirmed),
+    userConfirmed: true,
     revision: Math.max(1, Number(row.revision ?? 1)),
     validFrom: row.valid_from ? new Date(String(row.valid_from)).toISOString() : null,
     validUntil: row.valid_until ? new Date(String(row.valid_until)).toISOString() : null,

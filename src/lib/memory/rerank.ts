@@ -30,7 +30,7 @@ export async function selectRelevantMemories({
 }: SelectRelevantMemoriesInput): Promise<MemoryRecord[]> {
   const sorted = [...memories].sort(sortMemoryForPrompt);
   const pinned = sorted
-    .filter((memory) => memory.userConfirmed && PINNED_TYPES.has(memory.type))
+    .filter((memory) => PINNED_TYPES.has(memory.type))
     .slice(0, Math.min(3, limit));
   const pinnedIds = new Set(pinned.map((memory) => memory.id));
   const pool = sorted.filter((memory) => !pinnedIds.has(memory.id));

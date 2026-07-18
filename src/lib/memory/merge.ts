@@ -81,11 +81,7 @@ export function maintainMemoryRecords(memories: MemoryRecord[]): MemoryRecord[] 
   for (const memory of memories) {
     const target = findMergeTarget(maintained, memory);
 
-    // Never collapse two user-confirmed records in the background: they may
-    // look similar to a lexical matcher while carrying deliberately distinct
-    // wording or boundaries. Candidate ingestion can still merge unconfirmed
-    // duplicates with their provenance intact.
-    if (target && !target.userConfirmed && !memory.userConfirmed) {
+    if (target) {
       const index = maintained.findIndex((item) => item.id === target.id);
       maintained[index] = mergeMemoryRecord(target, memory, { applyDecay: false });
       continue;
@@ -140,8 +136,6 @@ export function applyMemoryDecay(memory: MemoryRecord, now = new Date()): Memory
 }
 
 export function effectiveMemoryImportance(memory: MemoryRecord, now = new Date()): number {
-  if (memory.userConfirmed) return memory.importance;
-
   const rate = decayRatePerDay[memory.type];
   if (rate == null) return memory.importance;
 
@@ -250,7 +244,6 @@ function clampImportance(value: number) {
 }
 
 function chooseContent(base: MemoryRecord, incoming: MemoryRecord): string {
-  if (incoming.userConfirmed && !base.userConfirmed) return incoming.content.trim();
   if (incoming.importance > base.importance + 10) return incoming.content.trim();
   if (incoming.content.trim().length > base.content.trim().length + 8) return incoming.content.trim();
   return base.content.trim();

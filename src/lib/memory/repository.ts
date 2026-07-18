@@ -7,7 +7,6 @@ import type { MemoryCandidate, MemoryRecord, MemoryUpdate } from "./types";
 import {
   addMemoryCandidates as addMemoryCandidatesInMemory,
   clearMemories as clearMemoriesInMemory,
-  confirmMemory as confirmMemoryInMemory,
   deleteMemory as deleteMemoryInMemory,
   getMemorySettings as getMemorySettingsInMemory,
   maintainMemories as maintainMemoriesInMemory,
@@ -27,7 +26,6 @@ export type MemoryRepository = {
   listMemories(userId: string): Promise<MemoryRecord[]>;
   listAllMemories(userId: string): Promise<MemoryRecord[]>;
   addMemoryCandidates(userId: string, candidates: MemoryCandidate[]): Promise<MemoryRecord[]>;
-  confirmMemory(userId: string, memoryId: string, expectedRevision?: number): Promise<MemoryRecord[]>;
   updateMemory(userId: string, memoryId: string, update: MemoryUpdate, expectedRevision?: number): Promise<MemoryRecord[]>;
   deleteMemory(userId: string, memoryId: string, expectedRevision?: number): Promise<MemoryRecord[]>;
   clearMemories(userId: string): Promise<MemoryRecord[]>;
@@ -75,10 +73,6 @@ const inMemoryMemoryRepository: MemoryRepository = {
   },
   async addMemoryCandidates(userId, candidates) {
     return addMemoryCandidatesInMemory(userId, candidates);
-  },
-  async confirmMemory(userId, memoryId, expectedRevision) {
-    assertExpectedMemoryRevision(listMemoriesInMemory(userId), memoryId, expectedRevision);
-    return confirmMemoryInMemory(userId, memoryId);
   },
   async updateMemory(userId, memoryId, update, expectedRevision) {
     assertExpectedMemoryRevision(listMemoriesInMemory(userId), memoryId, expectedRevision);
@@ -161,26 +155,6 @@ function createSupabaseMemoryRepository(client: SupabaseClient): MemoryRepositor
         existing = [...existing, incoming];
       }
 
-      return this.listMemories(userId);
-    },
-
-    async confirmMemory(userId, memoryId, expectedRevision) {
-      const now = new Date().toISOString();
-      const existing = await this.listMemories(userId);
-      const current = existing.find((memory) => memory.id === memoryId);
-      if (!current) return existing;
-      if (expectedRevision != null && current.revision !== expectedRevision) throw new SyncConflictError();
-      const { error } = await client
-        .from("memories")
-        .update({
-          user_confirmed: true,
-          confidence: 0.9,
-          last_seen_at: now,
-        })
-        .eq("user_id", userId)
-        .eq("id", memoryId);
-
-      if (error) throw new Error(`Failed to confirm memory: ${error.message}`);
       return this.listMemories(userId);
     },
 
@@ -320,7 +294,7 @@ function memoryRecordFromCandidate(userId: string, candidate: MemoryCandidate, n
     importance: candidate.importance,
     sensitivity: candidate.sensitivity,
     sourceMessageIds: candidate.sourceMessageIds,
-    userConfirmed: false,
+    userConfirmed: true,
     revision: 1,
     validFrom: candidate.validFrom,
     validUntil: candidate.validUntil,
@@ -373,7 +347,7 @@ function memoryFromRow(row: Record<string, unknown>): MemoryRecord {
     importance: Number(row.importance),
     sensitivity: row.sensitivity as MemoryRecord["sensitivity"],
     sourceMessageIds: Array.isArray(row.source_message_ids) ? row.source_message_ids.map(String) : [],
-    userConfirmed: Boolean(row.user_confirmed),
+    userConfirmed: true,
     revision: Math.max(1, Number(row.revision ?? 1)),
     validFrom: row.valid_from ? String(row.valid_from) : null,
     validUntil: row.valid_until ? String(row.valid_until) : null,
