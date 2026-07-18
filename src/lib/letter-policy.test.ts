@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLetterDue, selectLetterMemories } from "./letter-policy";
+import { isLetterDue, normalizeLetterContent, selectLetterMemories } from "./letter-policy";
 import type { MemoryRecord } from "./memory/types";
 
 const now = new Date("2026-07-18T04:00:00.000Z").getTime();
@@ -43,5 +43,13 @@ describe("timebox letter policy", () => {
     );
 
     expect(selected.map((item) => item.id)).toEqual(["automatic-event", "affect"]);
+  });
+
+  it("keeps generated letters within 500 characters", () => {
+    const normalized = normalizeLetterContent(`  ${"字".repeat(600)}  `);
+
+    expect(normalized).toHaveLength(500);
+    expect(normalized.endsWith("...")).toBe(true);
+    expect(normalizeLetterContent("   ").length).toBeGreaterThan(0);
   });
 });

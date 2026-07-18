@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ChatShell } from "@/components/ChatShell";
+import { LetterSyncScheduler } from "@/components/LetterSyncScheduler";
 import { isSetupComplete } from "@/lib/app-config";
 import { SESSION_COOKIE_NAME } from "@/lib/auth";
 import { isValidRuntimeSession } from "@/lib/auth-runtime";
@@ -13,5 +14,10 @@ export default async function Home() {
 
   if (!(await isValidRuntimeSession(session))) redirect("/login");
 
-  return <ChatShell />;
+  return (
+    <>
+      <LetterSyncScheduler />
+      <ChatShell />
+    </>
+  );
 }

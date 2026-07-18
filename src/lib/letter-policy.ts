@@ -5,6 +5,16 @@ export const letterWindowDays = 14;
 export const letterIntervalDays = 7;
 export const minimumLetterMemoryCount = 3;
 
+const fallbackLetterContent =
+  "这段时间你也在一步一步往前走。那些没有说完的话，可以先放在这里，我会替你安静地收着。";
+
+export function normalizeLetterContent(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) return fallbackLetterContent;
+
+  return trimmed.length > 500 ? `${trimmed.slice(0, 497).trim()}...` : trimmed;
+}
+
 export function isLetterDue(lastLetterAt: string | null, now = Date.now()) {
   if (!lastLetterAt) return true;
 

@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireApiSession } from "@/lib/auth-runtime";
 import { callDeepSeek } from "@/lib/deepseek";
-import { isLetterDue, minimumLetterMemoryCount, selectLetterMemories } from "@/lib/letter-policy";
+import {
+  isLetterDue,
+  minimumLetterMemoryCount,
+  normalizeLetterContent,
+  selectLetterMemories,
+} from "@/lib/letter-policy";
 import { createLetter, listLetters } from "@/lib/letters";
 import { getMemoryRepository } from "@/lib/memory/repository";
 import type { MemoryRecord } from "@/lib/memory/types";
@@ -109,13 +114,6 @@ function formatLetterMemory(memory: MemoryRecord) {
   return `- [${memory.type}][重要度 ${memory.importance}][${formatShanghaiTime(
     memory.lastSeenAt || memory.createdAt,
   )}] ${memory.content}`;
-}
-
-function normalizeLetterContent(content: string) {
-  const trimmed = content.trim();
-  if (!trimmed) return "这段时间你也在一步一步往前走。那些没有说完的话，可以先放在这里，我会替你安静地收着。";
-
-  return trimmed.length > 650 ? `${trimmed.slice(0, 650).trim()}...` : trimmed;
 }
 
 function formatShanghaiTime(value: string) {
